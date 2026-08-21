@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Merci
+Comment=Запуск Android-приложений в Linux
+Comment[en]=Run Android applications on Linux
+Exec=merci %f
+Icon=xyz.hackerstone.Merci
+Terminal=false
+Type=Application
+Categories=Game;Utility;
+Keywords=android;apk;roblox;emulator;
+MimeType=application/vnd.android.package-archive;
+StartupNotify=true
+StartupWMClass=xyz.hackerstone.Merci

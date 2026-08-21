@@ -1,0 +1,17 @@
+#!/bin/sh
+# Запускает GUI. Отдельный скрипт нужен, чтобы не зашивать sys.path в код:
+# внутри флатпака модуль лежит в /app/lib/merci.
+set -e
+export PYTHONPATH="/app/lib/merci${PYTHONPATH:+:$PYTHONPATH}"
+
+# Определяем эмуляцию по подделанному /proc/cpuinfo: qemu-user рисует там
+# "CPU implementer: 0x00" и "BogoMIPS: 100.00", тогда как настоящее железо
+# всегда указывает производителя (0x41 — ARM, 0x4e — NVIDIA и так далее).
+if [ "$(uname -m)" = "aarch64" ] &&
+   grep -qE '^CPU implementer[[:space:]]*:[[:space:]]*0x00$' /proc/cpuinfo 2>/dev/null; then
+  # GL-стек под эмуляцией всё равно упадёт в llvmpipe, а программный
+  # растеризатор внутри qemu — самое медленное из возможного. Обычный
+  # cairo рисует то же самое заметно живее.
+  export GSK_RENDERER="${GSK_RENDERER:-cairo}"
+fi
+exec python3 -m merci.main "$@"

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>xyz.hackerstone.Merci</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Merci</name>
+  <summary>Запуск Android-приложений в Linux</summary>
+  <summary xml:lang="en">Run Android applications on Linux</summary>
+
+  <description>
+    <p>
+      Merci — библиотека APK с графической оболочкой над Waydroid.
+      Перетащите APK в окно: Merci разберёт манифест, при необходимости
+      подготовит Waydroid (пакет, образ Android, сессию, трансляцию ARM64)
+      и отдаст приложение контейнеру.
+    </p>
+    <p>
+      Доступа к домашнему каталогу у Merci нет: APK попадают внутрь только
+      через портал выбора файлов или перетаскивание.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">xyz.hackerstone.Merci.desktop</launchable>
+
+  <categories>
+    <category>Game</category>
+    <category>Utility</category>
+  </categories>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">760</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-21">
+      <description>
+        <p>Первая открытая сборка (beta).</p>
+        <ul>
+          <li>Библиотека APK: перетащите файл — Merci разберёт манифест и запустит его в Waydroid.</li>
+          <li>Мастер подготовки контейнера с живым журналом: модуль ядра, образ Android, сессия, трансляция ARM64.</li>
+          <li>Аппаратное ускорение на NVIDIA через waydroid-nvidia.</li>
+          <li>Профили Android: второй аккаунт того же приложения без перелогина.</li>
+          <li>Ссылки из Android открываются браузером хоста.</li>
+          <li>Значок в трее с управлением контейнером.</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,70 @@
+# Сборка и публикация Merci.
+#
+# Запускается на теге вида v0.1.0 (или вручную). Собирает флатпак, кладёт
+# репозиторий на GitHub Pages — оттуда пользователи и обновляются — и
+# прикладывает одиночный .flatpak к релизу.
+name: Публикация
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Сборка флатпака
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Флатпак и среда выполнения
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub \
+            org.gnome.Platform//50 org.gnome.Sdk//50
+
+      - name: Сборка
+        run: bash scripts/publish.sh
+
+      - name: Страница и репозиторий для Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: Одиночный файл к релизу
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Merci.flatpak
+          body: |
+            Установка и обновление — через репозиторий Flatpak:
+
+                flatpak remote-add --user --if-not-exists merci \
+                  https://${{ github.repository_owner }}.github.io/Merci/merci.flatpakrepo
+                flatpak install --user merci xyz.hackerstone.Merci
+
+            Файл ниже — на случай установки без репозитория; обновляться он
+            не умеет.
+
+  deploy:
+    name: Выкладка на Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

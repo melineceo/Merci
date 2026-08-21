@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Merci — Android-приложения в Linux</title>
+<style>
+  :root { color-scheme: dark; --bg:#16151a; --card:#1f1e25; --line:#302e3a;
+          --text:#eceaf2; --dim:#a9a5b8; --accent:#7c5cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:48px 20px; background:var(--bg); color:var(--text);
+         font:16px/1.6 system-ui, "Cantarell", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; }
+  header { display:flex; align-items:center; gap:18px; margin-bottom:8px; }
+  header img { width:72px; height:72px; border-radius:16px; }
+  h1 { margin:0; font-size:34px; letter-spacing:-0.02em; }
+  .beta { display:inline-block; margin-left:10px; padding:2px 10px; border-radius:999px;
+          background:#6b4a00; color:#ffd479; font-size:13px; vertical-align:middle; }
+  p.lead { color:var(--dim); margin-top:6px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:20px 22px; margin:22px 0; }
+  h2 { font-size:19px; margin:0 0 12px; }
+  pre { background:#131218; border:1px solid var(--line); border-radius:10px;
+        padding:14px 16px; overflow-x:auto; margin:10px 0; }
+  code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size:14px; }
+  a { color:var(--accent); }
+  .note { border-left:3px solid #ffd479; padding-left:14px; color:var(--dim); }
+  footer { color:var(--dim); font-size:14px; margin-top:34px; text-align:center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icon.png" alt="">
+    <div>
+      <h1>Merci <span class="beta">beta __VERSION__</span></h1>
+      <p class="lead">Библиотека APK с графической оболочкой над Waydroid.</p>
+    </div>
+  </header>
+
+  <div class="card">
+    <h2>Установка</h2>
+    <pre><code>flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists merci https://__OWNER__.github.io/Merci/merci.flatpakrepo
+flatpak install --user merci xyz.hackerstone.Merci</code></pre>
+    <p class="note">Первая строка нужна для среды выполнения GNOME, вторая
+      добавляет репозиторий Merci.</p>
+  </div>
+
+  <div class="card">
+    <h2>Обновление</h2>
+    <pre><code>flatpak update --user xyz.hackerstone.Merci</code></pre>
+  </div>
+
+  <div class="card">
+    <h2>Чего ждать от беты</h2>
+    <p>Аппаратное ускорение доведено пока только для видеокарт NVIDIA
+      (проприетарный драйвер + waydroid-nvidia). На AMD и Intel приложение
+      работает, но частота кадров не проверялась.</p>
+  </div>
+
+  <footer>
+    <a href="https://github.com/__OWNER__/Merci">Исходный код и подробности — на GitHub</a>
+  </footer>
+</main>
+</body>
+</html>

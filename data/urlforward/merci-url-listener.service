@@ -1,0 +1,12 @@
+[Unit]
+Description=Merci: открывает ссылки из Waydroid в браузере хоста
+After=waydroid-container.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/merci/urlforward/merci-url-listener.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

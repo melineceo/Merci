@@ -1,0 +1,75 @@
+app-id: xyz.hackerstone.Merci
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+
+# Android внутрь флатпака не заворачивается: APK исполняет Waydroid —
+# настоящий Android в контейнере на хосте. Merci им управляет и остаётся
+# обычным приложением GTK.
+
+command: merci
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --socket=pulseaudio
+  - --share=network
+
+  # Waydroid — служба хоста: контейнер, binder в ядре, systemd-юнит. Внутрь
+  # песочницы это не заворачивается, поэтому Merci говорит с ним через
+  # flatpak-spawn --host. Право серьёзное — исполнение команд вне песочницы;
+  # отсюда вызывается только waydroid, pacman и pkexec для шагов установки.
+  # Пароль root проходит мимо Merci: диалог рисует polkit.
+  - --talk-name=org.freedesktop.Flatpak
+
+  # Значок в трее: панель держит службу StatusNotifierWatcher, Merci
+  # регистрирует в ней свой объект. Своё имя на шине для этого не нужно —
+  # регистрируемся по уникальному имени соединения.
+  - --talk-name=org.kde.StatusNotifierWatcher
+
+  # Доступа к $HOME нет: APK попадают внутрь через портал выбора файлов или
+  # перетаскивание — по одному файлу и по явному действию пользователя.
+
+cleanup:
+  - /include
+  - /share/man
+  - '*.la'
+  - '*.a'
+
+modules:
+  - name: merci
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 scripts/merci-launcher /app/bin/merci
+      - mkdir -p /app/lib/merci
+      - cp -r src/merci /app/lib/merci/merci
+      # Исходники перехватчика ссылок едут в составе флатпака: шаг установки
+      # копирует их на хост и собирает там, где есть Android SDK.
+      - mkdir -p /app/share/merci/urlforward
+      - cp -r data/urlforward/. /app/share/merci/urlforward/
+      - chmod +x /app/share/merci/urlforward/build-apk.sh
+      - chmod +x /app/share/merci/urlforward/merci-url-listener.py
+      - install -Dm644 data/xyz.hackerstone.Merci.desktop
+        /app/share/applications/xyz.hackerstone.Merci.desktop
+      - install -Dm644 data/xyz.hackerstone.Merci.metainfo.xml
+        /app/share/metainfo/xyz.hackerstone.Merci.metainfo.xml
+      # Значок ставим набором готовых размеров: он растровый, и панель со
+      # списком приложений возьмут подходящий сами.
+      - |
+        for size in 16 22 24 32 48 64 128 256; do
+          install -Dm644 "data/icons/${size}x${size}/xyz.hackerstone.Merci.png" \
+            "/app/share/icons/hicolor/${size}x${size}/apps/xyz.hackerstone.Merci.png"
+        done
+    sources:
+      - type: dir
+        path: .
+        # в сборку идут только исходники: APK и артефакты предыдущих
+        # сборок весят сотни мегабайт и копировать их незачем
+        skip:
+          - build
+          - repo
+          - .flatpak-builder
+          - .git
+          - '*.apk'

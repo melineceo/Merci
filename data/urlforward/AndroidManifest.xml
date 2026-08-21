@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Перехватчик ссылок для Waydroid.
+
+  Android ловит http/https своим браузером, а из контейнера отдать ссылку
+  хосту нечем: в Waydroid работает только обратное направление. Это
+  приложение закрывает пробел — принимает VIEW-интент и передаёт адрес
+  службе на хосте.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="xyz.hackerstone.merci.urlopen"
+    android:versionCode="3"
+    android:versionName="1.2">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      usesCleartextTraffic обязателен: с targetSdk 28 и выше Android
+      запрещает обычный HTTP, а мы стучимся к службе на шлюзе контейнера
+      по локальному адресу. Без этого запрос молча не уходит.
+    -->
+    <application android:label="Открыть на компьютере"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true">
+        <activity android:name="xyz.hackerstone.merci.urlforward.ForwardActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+        </activity>
+
+        <!-- Единственная видимая часть: проверка связи из меню Android. -->
+        <activity android:name="xyz.hackerstone.merci.urlforward.CheckActivity"
+            android:exported="true"
+            android:label="Связь с компьютером"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

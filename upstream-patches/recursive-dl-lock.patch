@@ -1,0 +1,55 @@
+Рекурсивный замок динамического линковщика.
+
+Линковщик из bionic_translation держит один нерекурсивный мьютекс на всё:
+dlopen, dlsym, dlclose. Настоящий Android так не делает — там замок
+рекурсивный (PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP в bionic/linker), и это
+не мелочь: конструкторы библиотеки вызываются, пока замок ещё удерживается,
+а библиотеке никто не запрещает позвать оттуда dlopen.
+
+Ровно так делает libroblox.so, и процесс вставал намертво:
+
+  main       apkenv_call_constructors_recursive -> конструктор libroblox.so
+             -> bionic_dlopen -> pthread_mutex_lock (замок уже наш)
+  WM.task-1  bionic_dlsym -> pthread_mutex_lock (ждёт main)
+  RBX Worker sched_yield по кругу — ждёт инициализацию, которой не будет
+
+Приложение при этом выглядело «запущенным»: процесс жив, потоки есть, а окно
+не появляется никогда.
+
+--- a/linker/dlfcn.c
++++ b/linker/dlfcn.c
+@@ -55,7 +55,7 @@
+     [DL_ERR_SYMBOL_NOT_GLOBAL] = "Symbol is not global",
+ };
+ 
+-static pthread_mutex_t apkenv_dl_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_mutex_t apkenv_dl_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+ 
+ static void set_dlerror(int err)
+ {
+
+Заодно: отладочная печать каждой перемещаемой ссылки.
+
+Линковщик безусловно пишет в stderr строку на каждую релокацию. Для
+libroblox.so это полмиллиона строк и 58 МБ на один запуск — журнал сеанса,
+который читает пользователь, тонет в них, а диск и время тратятся зря.
+Печать оставлена там же, но под тем же флагом подробности, что и остальная
+отладка линковщика.
+
+--- a/linker/linker.c
++++ b/linker/linker.c
+@@ -2202,11 +2202,13 @@
+ 			// FIXME: clean up apkenv_reloc_library so we don't need to do this
+ 			// (this function expects an array, and will probably be extra slow like this)
+ #if defined(USE_RELA)
+-			fprintf(stderr, "calling apkenv_reloc_library with packed reloc: {.offset = 0x%lx, .r_info = 0x%lx, .r_addend = 0x%lx}\n", reloc.r_offset, reloc.r_info, reloc.r_addend);
++			if (apkenv_debug_verbosity > 1)
++				fprintf(stderr, "calling apkenv_reloc_library with packed reloc: {.offset = 0x%lx, .r_info = 0x%lx, .r_addend = 0x%lx}\n", reloc.r_offset, reloc.r_info, reloc.r_addend);
+ #else
+-			fprintf(stderr, "calling apkenv_reloc_library with packed reloc: {.offset = 0x%lx, .r_info = 0x%lx}\n", reloc.r_offset, reloc.r_info);
++			if (apkenv_debug_verbosity > 1)
++				fprintf(stderr, "calling apkenv_reloc_library with packed reloc: {.offset = 0x%lx, .r_info = 0x%lx}\n", reloc.r_offset, reloc.r_info);
+ #endif
+ 			ret = apkenv_reloc_library(si, &reloc, 1);
+ 			if (unlikely(ret))
+ 				return false;
