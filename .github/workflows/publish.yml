@@ -1,8 +1,12 @@
 # Сборка и публикация Merci.
 #
 # Запускается на теге вида v0.1.0 (или вручную). Собирает флатпак, кладёт
-# репозиторий на GitHub Pages — оттуда пользователи и обновляются — и
-# прикладывает одиночный .flatpak к релизу.
+# репозиторий раздачи в ветку gh-pages — оттуда пользователи и обновляются —
+# и прикладывает одиночный .flatpak к релизу.
+#
+# Ветка, а не artifact + deploy-pages: тем же способом публикует и
+# scripts/publish-pages.sh, так что ручная выкладка и сборка на стороне
+# GitHub делают ровно одно и то же.
 name: Публикация
 
 on:
@@ -12,16 +16,14 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: publish
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Сборка флатпака
+  publish:
+    name: Собрать и выложить
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,36 +37,37 @@ jobs:
           flatpak install --user -y --noninteractive flathub \
             org.gnome.Platform//50 org.gnome.Sdk//50
 
-      - name: Сборка
-        run: bash scripts/publish.sh
+      - name: Сборка репозитория и одиночного файла
+        run: |
+          MERCI_OWNER="${{ github.repository_owner }}" bash scripts/publish.sh
 
-      - name: Страница и репозиторий для Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
+      - name: Выкладка раздачи в gh-pages
+        run: |
+          cd dist
+          rm -rf build
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="github-actions" \
+              -c user.email="github-actions@users.noreply.github.com" \
+              commit -qm "Раздача Merci ${GITHUB_REF_NAME}"
+          git push -q --force \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" \
+            gh-pages
 
-      - name: Одиночный файл к релизу
+      - name: Релиз с одиночным файлом
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/Merci.flatpak
-          body: |
-            Установка и обновление — через репозиторий Flatpak:
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/Merci.flatpak \
+            --title "Merci ${GITHUB_REF_NAME}" \
+            --notes "Установка и обновление — через репозиторий Flatpak:
 
-                flatpak remote-add --user --if-not-exists merci \
-                  https://${{ github.repository_owner }}.github.io/Merci/merci.flatpakrepo
-                flatpak install --user merci xyz.hackerstone.Merci
+          \`\`\`bash
+          flatpak remote-add --user --if-not-exists merci \\
+            https://${{ github.repository_owner }}.github.io/Merci/merci.flatpakrepo
+          flatpak install --user merci xyz.hackerstone.Merci
+          \`\`\`
 
-            Файл ниже — на случай установки без репозитория; обновляться он
-            не умеет.
-
-  deploy:
-    name: Выкладка на Pages
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          Файл ниже — на случай установки без репозитория; обновляться такая
+          установка не умеет."
