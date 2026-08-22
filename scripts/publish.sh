@@ -17,7 +17,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 OWNER="${MERCI_OWNER:-melineceo}"
-PAGES="https://${OWNER}.github.io/Merci"
+
+# Раздача живёт на своём домене, а не на github.io: адрес короче, и если
+# однажды придётся уехать с GitHub, у пользователей ничего не сломается —
+# поменяется только запись DNS. Сам файл CNAME обязателен: по нему Pages и
+# узнаёт, какой домен обслуживать.
+DOMAIN="${MERCI_DOMAIN:-repo.hackerstone.xyz}"
+PAGES="https://${DOMAIN}"
 APP_ID="xyz.hackerstone.Merci"
 MANIFEST="${APP_ID}.yaml"
 DIST="dist"
@@ -83,6 +89,10 @@ sed -e "s|__OWNER__|$OWNER|g" -e "s|__VERSION__|$VERSION|g" \
 # Pages не отдаёт файлы и каталоги, начинающиеся с точки или подчёркивания,
 # а ostree-репозиторий без них нерабочий.
 touch "$DIST/.nojekyll"
+
+# Домен для GitHub Pages. Лежит в самой ветке раздачи, поэтому переживает
+# любую переустановку настроек репозитория.
+echo "$DOMAIN" > "$DIST/CNAME"
 
 cat <<INFO
 

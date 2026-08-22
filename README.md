@@ -68,7 +68,7 @@ flowchart LR
 flatpak remote-add --user --if-not-exists flathub \
   https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak remote-add --user --if-not-exists merci \
-  https://melineceo.github.io/Merci/merci.flatpakrepo
+  https://repo.hackerstone.xyz/merci.flatpakrepo
 flatpak install --user merci xyz.hackerstone.Merci
 ```
 
