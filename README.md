@@ -8,8 +8,9 @@
 
 **Android-приложения в Linux — перетащил APK и запустил.**
 
-[![версия](https://img.shields.io/badge/версия-0.1.0-7c5cff)](https://github.com/melineceo/Merci/releases)
+[![версия](https://img.shields.io/badge/версия-0.1.1-7c5cff)](https://github.com/melineceo/Merci/releases)
 [![beta](https://img.shields.io/badge/статус-beta-ffb02e)](#-это-beta)
+[![изменения](https://img.shields.io/badge/что_менялось-CHANGELOG-8a8f98)](CHANGELOG.md)
 [![лицензия](https://img.shields.io/badge/лицензия-MIT-3aa675)](LICENSE)
 [![flatpak](https://img.shields.io/badge/установка-Flatpak-4a90d9)](#установка)
 
@@ -696,13 +697,14 @@ signal 11 (SIGSEGV), code 2 (SEGV_ACCERR)
 Чтобы выпустить новую версию:
 
 ```bash
-# 1. поднять номер в src/merci/main.py и добавить <release> в metainfo
+# 1. поднять номер в src/merci/main.py, добавить <release> в metainfo
+#    и описать выпуск в CHANGELOG.md и CHANGELOG.en.md
 # 2. собрать репозиторий и одиночный файл
 bash scripts/publish.sh
 # 3. выложить репозиторий на GitHub Pages
 bash scripts/publish-pages.sh
 # 4. пометить выпуск
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.1 && git push origin v0.1.1
 ```
 
 Шаг с тегом запускает [рабочий процесс](.github/workflows/publish.yml): он

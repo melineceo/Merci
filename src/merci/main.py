@@ -18,7 +18,7 @@ from .settings import Settings  # noqa: E402
 from .window import MerciWindow  # noqa: E402
 
 APP_ID = "xyz.hackerstone.Merci"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 _CSS = """
 .merci-icon {

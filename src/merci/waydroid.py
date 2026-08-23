@@ -52,24 +52,28 @@ def status(use_cache: bool = True) -> tuple[bool, str]:
 
 
 def _probe() -> tuple[bool, str]:
+    # Описание возвращаем русским исходником, без перевода: по нему plan()
+    # решает, нужен ли шаг загрузки образа. Переведи мы здесь — сравнение
+    # перестало бы совпадать при английском языке, и шаг молча пропал бы.
+    # Переводит тот, кто показывает.
     if not _ok(["sh", "-c", "command -v waydroid"]):
-        return False, tr("не установлен")
+        return False, "не установлен"
     result = _run(["waydroid", "status"])
     if result.returncode != 0:
         lines = (result.stderr or result.stdout).strip().splitlines()
-        return False, lines[-1] if lines else tr("недоступен")
+        return False, lines[-1] if lines else "недоступен"
 
     # waydroid отвечает по-разному в зависимости от версии и подкоманды:
     # "Session:\tRUNNING", "UNINITIALIZED" либо фразой
     # 'Waydroid is not initialized, run "waydroid init"'.
     output = result.stdout.upper()
     if "NOT INITIALIZED" in output or "UNINITIALIZED" in output:
-        return False, tr("образ Android не загружен")
+        return False, "образ Android не загружен"
     if "RUNNING" in output:
-        return True, tr("сессия запущена")
+        return True, "сессия запущена"
     if "STOPPED" in output:
-        return False, tr("сессия остановлена")
-    return False, tr("состояние неясно")
+        return False, "сессия остановлена"
+    return False, "состояние неясно"
 
 
 def _prop(name: str) -> str:
@@ -703,10 +707,20 @@ def display_step(monitor: tuple[int, int]) -> Step | None:
     )
 
     hint = (
-        f"рендер {width}×{height}, растянутый на {monitor_width}×{monitor_height}"
+        tr(
+            "рендер {width}×{height}, растянутый на {screen_width}×{screen_height}",
+            width=width,
+            height=height,
+            screen_width=monitor_width,
+            screen_height=monitor_height,
+        )
         if stretch
-        else f"окно {width}×{height} — gamescope на этой машине не работает, "
-        "растягивать нечем"
+        else tr(
+            "окно {width}×{height} — gamescope на этой машине не работает, "
+            "растягивать нечем",
+            width=width,
+            height=height,
+        )
     )
     return Step(
         key="display",
@@ -758,7 +772,7 @@ def plan(needs_bridge: bool, monitor: tuple[int, int] = (0, 0)) -> list[Step]:
                 Step(
                     key="network",
                     title="Связь с сервером образов",
-                    hint=f"проверка {OTA_URL}",
+                    hint=tr("проверка {url}", url=OTA_URL),
                     argv=[
                         "sh",
                         "-c",
@@ -995,7 +1009,7 @@ def _ndk_step(target: str = DEFAULT_BRIDGE) -> Step:
     )
     return Step(
         key="ndk",
-        title=f"Архив транслятора ({target})",
+        title=tr("Архив транслятора ({target})", target=target),
         hint="берём из загрузок или качаем с докачкой",
         argv=["sh", "-c", script],
         downloads=os.path.basename(local),
@@ -1156,7 +1170,7 @@ class StepRunner:
         """
         command = " ".join(_quote(a) for a in self.step.argv)
         self._on_line(f"$ {command} (в фоне)")
-        self._on_progress(None, "Поднимаем контейнер Android")
+        self._on_progress(None, tr("Поднимаем контейнер Android"))
         try:
             Gio.Subprocess.new(
                 host_argv(["sh", "-c", f"setsid {command} >/dev/null 2>&1 &"]),
@@ -1217,7 +1231,7 @@ class StepRunner:
                 *argv,
             ]
             self._on_line("пароль спросит системное окно")
-            self._on_progress(None, "Подтвердите пароль в системном окне")
+            self._on_progress(None, tr("Подтвердите пароль в системном окне"))
 
         launcher = Gio.SubprocessLauncher.new(
             Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE
@@ -1258,7 +1272,7 @@ class StepRunner:
         self._on_line(
             f"открыто окно {terminal[0]}: если спросит пароль, введите его там"
         )
-        self._on_progress(None, f"Подтвердите пароль в окне {terminal[0]}")
+        self._on_progress(None, tr("Подтвердите пароль в окне {app}", app=terminal[0]))
         command = " ".join(_quote(a) for a in self.step.argv)
         log = _quote(self._tail_path)
         # Вывод дублируем в файл: терминал печатает в своё окно, а прогресс
@@ -1372,7 +1386,7 @@ class StepRunner:
 
         phase = _parse_phase(text)
         if phase:
-            self._on_progress(None, phase)
+            self._on_progress(None, tr(phase))
         self._on_line(text)
 
     # -- завершение ------------------------------------------------------
@@ -1398,7 +1412,8 @@ class StepRunner:
             return
         share = min(float(megabytes) / _NDK_SIZE_MB, 1.0)
         self._on_progress(
-            share, f"{megabytes:.1f} из {_NDK_SIZE_MB:.0f} МБ"
+            share,
+            tr("{done} из {total} МБ", done=f"{megabytes:.1f}", total=f"{_NDK_SIZE_MB:.0f}"),
         )
 
     def _watch_cache(self) -> bool:
@@ -1411,7 +1426,7 @@ class StepRunner:
         if self._done or not megabytes:
             return
         self._cache_seen = max(self._cache_seen, float(megabytes))
-        self._on_progress(None, f"Скачано {self._cache_seen:.0f} МБ образа")
+        self._on_progress(None, tr("Скачано {mb} МБ образа", mb=f"{self._cache_seen:.0f}"))
 
     def _nudge(self) -> bool:
         if self._done:
@@ -1564,7 +1579,7 @@ def _parse_progress(text: str) -> tuple[float, str] | None:
     curl = _CURL_RE.search(text)
     if curl is not None:
         share = float(curl.group(1)) / 100
-        return share, f"скачано {curl.group(1)}%"
+        return share, tr("скачано {percent}%", percent=curl.group(1))
 
     """Из строки прогресса waydroid делает (доля, человеческое описание)."""
     match = _PROGRESS_RE.search(text)
@@ -1577,10 +1592,20 @@ def _parse_progress(text: str) -> tuple[float, str] | None:
 
     fraction = min(done_mb / total_mb, 1.0)
     speed_mb = speed_value if unit == "MB" else speed_value / 1000
-    detail = f"{done_mb:.0f} из {total_mb:.0f} МБ · {speed_value:.1f} {unit}/с"
+    detail = tr(
+        "{done} из {total} МБ · {speed} {unit}/с",
+        done=f"{done_mb:.0f}",
+        total=f"{total_mb:.0f}",
+        speed=f"{speed_value:.1f}",
+        unit=unit,
+    )
     if speed_mb > 0.05:
         left = int((total_mb - done_mb) / speed_mb)
-        detail += f" · осталось ~{left // 60} мин" if left >= 60 else f" · осталось ~{left} с"
+        detail += (
+            tr(" · осталось ~{n} мин", n=left // 60)
+            if left >= 60
+            else tr(" · осталось ~{n} с", n=left)
+        )
     return fraction, detail
 
 
@@ -1983,10 +2008,56 @@ def set_browser_role(user: int | None = None) -> None:
                 ],
                 timeout=90,
             )
+            _wake_urlforward(number)
     except WaydroidError:
         # Контейнер не отвечает — ссылки просто будут спрашивать, чем
         # открыть; ронять из-за этого ничего не нужно.
         pass
+
+
+def _wake_urlforward(user: int) -> None:
+    """Снимает с перехватчика состояние «остановлен» в профиле.
+
+    Пакет, установленный в профиль, но ни разу там не запущенный, Android
+    считает остановленным и не предлагает его неявным намерениям — ссылка
+    из игры не находит обработчика вовсе. В Android 13 команды `am unstop`
+    ещё нет, а единственный способ снять флаг — один раз запустить пакет.
+
+    Поэтому сначала спрашиваем, чем профиль откроет ссылку, и трогаем
+    приложение, только если наш перехватчик в ответе не появился: окно
+    проверки связи показывает всплывающую подсказку, и делать это на каждый
+    запуск незачем.
+    """
+    resolved = _adb(
+        [
+            "shell",
+            "cmd",
+            "package",
+            "resolve-activity",
+            "--brief",
+            "--user",
+            str(user),
+            "-a",
+            "android.intent.action.VIEW",
+            "-d",
+            "https://example.com",
+        ],
+        timeout=60,
+    )
+    if URLFORWARD_PACKAGE in resolved.stdout:
+        return
+    _adb(
+        [
+            "shell",
+            "am",
+            "start",
+            "--user",
+            str(user),
+            "-n",
+            f"{URLFORWARD_PACKAGE}/xyz.hackerstone.merci.urlforward.CheckActivity",
+        ],
+        timeout=60,
+    )
 
 
 def current_android_user() -> int:
@@ -2577,7 +2648,7 @@ def magisk_step(remove: bool = False) -> Step:
     return Step(
         key="magisk-remove" if remove else "magisk",
         title="Убрать root (Magisk)" if remove else "Установить root (Magisk)",
-        hint=f"waydroid_script {action} magisk, с перезапуском контейнера",
+        hint=tr("waydroid_script {action} magisk, с перезапуском контейнера", action=action),
         argv=["sh", "-c", _bridge_script("magisk", action)],
         root=True,
         minutes=6,
@@ -2675,7 +2746,7 @@ def switch_bridge_step(target: str) -> Step:
     """
     return Step(
         key="switch-bridge",
-        title=f"Переключить транслятор на {target}",
+        title=tr("Переключить транслятор на {target}", target=target),
         hint="переустановка через waydroid_script",
         argv=["sh", "-c", _bridge_script(target)],
         root=True,

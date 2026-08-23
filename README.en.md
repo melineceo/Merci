@@ -8,8 +8,9 @@
 
 **Android apps on Linux — drop in an APK and launch it.**
 
-[![version](https://img.shields.io/badge/version-0.1.0-7c5cff)](https://github.com/melineceo/Merci/releases)
+[![version](https://img.shields.io/badge/version-0.1.1-7c5cff)](https://github.com/melineceo/Merci/releases)
 [![beta](https://img.shields.io/badge/status-beta-ffb02e)](#-this-is-a-beta)
+[![changelog](https://img.shields.io/badge/changelog-CHANGELOG-8a8f98)](CHANGELOG.en.md)
 [![license](https://img.shields.io/badge/license-MIT-3aa675)](LICENSE)
 [![flatpak](https://img.shields.io/badge/install-Flatpak-4a90d9)](#install)
 
@@ -714,7 +715,7 @@ bash scripts/publish.sh
 # 3. put the repository on GitHub Pages
 bash scripts/publish-pages.sh
 # 4. tag the release
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.1 && git push origin v0.1.1
 ```
 
 The tag step starts the [workflow](.github/workflows/publish.yml): it builds the

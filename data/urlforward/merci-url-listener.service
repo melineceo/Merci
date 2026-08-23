@@ -4,6 +4,10 @@ After=waydroid-container.service
 
 [Service]
 Type=simple
+# Браузер, открытый по ссылке, остаётся в cgroup службы: systemd по умолчанию
+# гасит всю группу, и перезапуск слушателя закрыл бы окна пользователя вместе
+# со вкладками. Останавливаем только сам слушатель — браузер не наш.
+KillMode=process
 ExecStart=%h/.local/share/merci/urlforward/merci-url-listener.py
 Restart=on-failure
 RestartSec=5

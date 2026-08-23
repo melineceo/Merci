@@ -344,7 +344,6 @@ TABLE: dict[str, str] = {
         "Android.",
 
     # ------------------------------------------------------- сообщения ----
-    "х": "x",
     "Слишком странное разрешение": "That resolution looks wrong",
     "Не удалось настроить дисплей": "Could not configure the display",
     "Готово: размер сброшен": "Done: size reset",
@@ -528,6 +527,38 @@ TABLE: dict[str, str] = {
     "выключает подповерхности: из-за них кадр обновляется только на ввод":
         "turns subsurfaces off: they make the frame refresh only on input",
     "Подгонка под экран": "Fit to the screen",
+    # Ход выполнения шага: фазы из вывода waydroid и счётчики загрузки.
+    "Поднимаем контейнер Android": "Bringing the Android container up",
+    "Подтвердите пароль в системном окне": "Confirm the password in the system dialog",
+    "Подтвердите пароль в окне {app}": "Confirm the password in the {app} window",
+    "{done} из {total} МБ": "{done} of {total} MB",
+    "Скачано {mb} МБ образа": "{mb} MB of the image downloaded",
+    "скачано {percent}%": "{percent}% downloaded",
+    "{done} из {total} МБ · {speed} {unit}/с": "{done} of {total} MB · {speed} {unit}/s",
+    " · осталось ~{n} мин": " · ~{n} min left",
+    " · осталось ~{n} с": " · ~{n} s left",
+    "Загружаем образ системы": "Downloading the system image",
+    "Проверяем контрольную сумму": "Verifying the checksum",
+    "Распаковываем образ": "Extracting the image",
+    "Настраиваем контейнер": "Setting the container up",
+    "Готовим контейнер": "Preparing the container",
+    "Запускаем сессию": "Starting the session",
+    "Устанавливаем": "Installing",
+    "Разбираем зависимости": "Resolving dependencies",
+    "Ставим пакет": "Installing the package",
+    # Подписи с подстановкой: значения ставятся уже после перевода, поэтому
+    # имена в скобках должны совпадать с русской строкой один в один.
+    "рендер {width}×{height}, растянутый на {screen_width}×{screen_height}":
+        "rendering {width}×{height}, stretched to {screen_width}×{screen_height}",
+    "окно {width}×{height} — gamescope на этой машине не работает, "
+    "растягивать нечем":
+        "a {width}×{height} window — gamescope does not work on this machine, "
+        "so there is nothing to stretch with",
+    "проверка {url}": "checking {url}",
+    "Архив транслятора ({target})": "Translator archive ({target})",
+    "waydroid_script {action} magisk, с перезапуском контейнера":
+        "waydroid_script {action} magisk, with a container restart",
+    "Переключить транслятор на {target}": "Switch the translator to {target}",
     "берём из загрузок или качаем с докачкой":
         "taken from downloads or fetched with resume support",
     "Установить gamescope": "Install gamescope",

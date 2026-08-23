@@ -32,12 +32,16 @@ _ABI_LABEL = {
 
 
 def _human_size(count: int) -> str:
+    # Единицы перебираем исходными, переводим только то, что уходит на экран:
+    # сравнивать переведённые строки между собой — значит поставить работу
+    # функции в зависимость от словаря.
     value = float(count)
-    for unit in (tr("Б"), tr("КБ"), tr("МБ"), tr("ГБ")):
-        if value < 1024 or unit == tr("ГБ"):
-            return f"{value:.0f} {unit}" if unit in (tr("Б"), tr("КБ")) else f"{value:.1f} {unit}"
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            digits = 0 if unit in ("Б", "КБ") else 1
+            return f"{value:.{digits}f} {tr(unit)}"
         value /= 1024
-    return tr("{value} ГБ", value=f"{value:.1f}")
+    return f"{value:.1f} {tr('ГБ')}"
 
 
 def _human_time(stamp: float) -> str:
@@ -596,7 +600,9 @@ class MerciWindow(Adw.ApplicationWindow):
         if entry is None:
             return
 
-        text = row.get_text().strip().lower().replace(tr("х"), "x").replace("*", "x")
+        # Кириллическая «х» — не перевод, а то, что реально приходит с русской
+        # раскладки: «1600х900». Заменяем её всегда, независимо от языка окна.
+        text = row.get_text().strip().lower().replace("х", "x").replace("*", "x")
         width = height = 0
         if text:
             try:
@@ -832,8 +838,11 @@ class MerciWindow(Adw.ApplicationWindow):
         if entry is None or entry.slug != slug:
             return
 
+        # detail приходит от status() исходной строкой — переводим здесь.
         self.state_row.set_subtitle(
-            tr("сессия запущена") if ready else tr("{detail} — нажмите, чтобы подготовить", detail=detail)
+            tr("сессия запущена")
+            if ready
+            else tr("{detail} — нажмите, чтобы подготовить", detail=tr(detail))
         )
         # Выключать нечего, если контейнер и так не работает.
         self.stop_row.set_sensitive(ready)
@@ -854,7 +863,7 @@ class MerciWindow(Adw.ApplicationWindow):
         blocked = not ready or (needs_bridge and not bridge)
         if blocked:
             self.banner.set_title(
-                tr("Waydroid не готов: {detail}", detail=detail)
+                tr("Waydroid не готов: {detail}", detail=tr(detail))
                 if not ready
                 else tr("Нужна трансляция ARM64 → x86_64 (libndk)")
             )

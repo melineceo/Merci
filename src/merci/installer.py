@@ -41,7 +41,7 @@ class StepRow(Adw.ActionRow):
     }
 
     def __init__(self, step: waydroid.Step) -> None:
-        super().__init__(title=step.title, subtitle=step.hint)
+        super().__init__(title=tr(step.title), subtitle=tr(step.hint))
         self.step = step
         self.add_css_class("merci-step")
 
@@ -293,8 +293,8 @@ class InstallerDialog(Adw.Dialog):
         self._step_started_at = time.monotonic()
 
         self.step_label.set_text(tr("Шаг {n} из {total}", n=self._index + 1, total=len(self._steps)))
-        self.phase_label.set_text(step.title)
-        self.detail_label.set_text(step.hint)
+        self.phase_label.set_text(tr(step.title))
+        self.detail_label.set_text(tr(step.hint))
         self.percent_label.set_text("")
         self._pulse(True)
         self._append_log(f"$ {step.command_line()}")
@@ -364,24 +364,27 @@ class InstallerDialog(Adw.Dialog):
 
     # -- финал -----------------------------------------------------------
 
+    # Тело класса выполняется при импорте — то есть раньше, чем выбран язык,
+    # поэтому здесь лежат русские исходники, а перевод берётся в _failed,
+    # в момент показа.
     _HINTS = {
         "bridge": (
-            tr("Не удалось поставить трансляцию ARM64"),
-            tr("Архив транслятора качается с GitHub, и соединение оборвалось "
+            "Не удалось поставить трансляцию ARM64",
+            "Архив транслятора качается с GitHub, и соединение оборвалось "
             "(в журнале — SSL: RECORD_LAYER_FAILURE или таймаут). Merci уже "
             "делает три попытки и пробует запасной libhoudini.\n\n"
             "Обычно помогает другая локация VPN: канал должен держать "
             "непрерывную передачу в несколько сотен мегабайт. "
-            "Всё остальное уже установлено, повторить можно только этот шаг."),
+            "Всё остальное уже установлено, повторить можно только этот шаг.",
         ),
         "network": (
-            tr("Сервер образов Waydroid не отвечает"),
-            tr("ota.waydro.id раздаётся через GitHub Pages, и у вас он недоступен. "
+            "Сервер образов Waydroid не отвечает",
+            "ota.waydro.id раздаётся через GitHub Pages, и у вас он недоступен. "
             "Сам waydroid init начинает именно с этого адреса и в такой ситуации "
             "висит бесконечно и молча — поэтому Merci проверяет связь заранее.\n\n"
             "Что можно сделать: включить VPN и повторить, либо прописать своё "
             "зеркало в файл ota.conf в данных Merci — первая строка system, "
-            "вторая vendor."),
+            "вторая vendor.",
         ),
     }
 
@@ -390,14 +393,13 @@ class InstallerDialog(Adw.Dialog):
         self.set_can_close(True)
         self.recheck.set_sensitive(True)
 
-        title, detail = self._HINTS.get(
-            step.key,
-            (
-                tr("Шаг «{title}» не выполнился", title=tr(step.title)),
-                tr("Подробности в журнале. Ту же команду можно выполнить вручную — "
-                "кнопка скопирует её в буфер обмена."),
-            ),
-        )
+        hint = self._HINTS.get(step.key)
+        if hint is None:
+            title = tr("Шаг «{title}» не выполнился", title=tr(step.title))
+            detail = tr("Подробности в журнале. Ту же команду можно выполнить вручную — "
+                        "кнопка скопирует её в буфер обмена.")
+        else:
+            title, detail = (tr(text) for text in hint)
         self.phase_label.set_text(title)
         self.detail_label.set_text(detail)
         self.log_expander.set_expanded(step.key not in self._HINTS)
@@ -426,7 +428,7 @@ class InstallerDialog(Adw.Dialog):
             )
         else:
             self.phase_label.set_text(tr("Почти готово"))
-            self.detail_label.set_text(detail)
+            self.detail_label.set_text(tr(detail))
             self.percent_label.set_text("")
             self.primary.set_label(tr("Проверить снова"))
             self.primary.set_visible(True)
