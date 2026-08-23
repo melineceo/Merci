@@ -91,6 +91,8 @@ jobs:
           Уже установленной Merci хватит \`flatpak update\`. Файл ниже — на
           случай установки без репозитория; обновляться такая установка не
           умеет.
+
+          Полный список изменений: [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) · [English](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.en.md)
           NOTES
 
           # Релиз мог быть создан вручную до тега: тогда не падаем, а
