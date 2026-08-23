@@ -14,6 +14,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from . import apk, hostexec, waydroid  # noqa: E402
 from .settings import Settings  # noqa: E402
+from .i18n import LANGUAGES, set_language, tr  # noqa: E402
 from .tray import MenuItem, TrayIcon  # noqa: E402
 from .installer import InstallerDialog  # noqa: E402
 from .library import Entry, Library, host_abi  # noqa: E402
@@ -32,23 +33,23 @@ _ABI_LABEL = {
 
 def _human_size(count: int) -> str:
     value = float(count)
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if value < 1024 or unit == "ГБ":
-            return f"{value:.0f} {unit}" if unit in ("Б", "КБ") else f"{value:.1f} {unit}"
+    for unit in (tr("Б"), tr("КБ"), tr("МБ"), tr("ГБ")):
+        if value < 1024 or unit == tr("ГБ"):
+            return f"{value:.0f} {unit}" if unit in (tr("Б"), tr("КБ")) else f"{value:.1f} {unit}"
         value /= 1024
-    return f"{value:.1f} ГБ"
+    return tr("{value} ГБ", value=f"{value:.1f}")
 
 
 def _human_time(stamp: float) -> str:
     if not stamp:
-        return "ещё не запускалось"
+        return tr("ещё не запускалось")
     delta = time.time() - stamp
     if delta < 90:
-        return "только что"
+        return tr("только что")
     if delta < 3600:
-        return f"{int(delta // 60)} мин назад"
+        return tr("{n} мин назад", n=int(delta // 60))
     if delta < 86400:
-        return f"{int(delta // 3600)} ч назад"
+        return tr("{n} ч назад", n=int(delta // 3600))
     return time.strftime("%d.%m.%Y", time.localtime(stamp))
 
 
@@ -116,9 +117,9 @@ class AppRow(Gtk.ListBoxRow):
             badge.add_css_class("merci-badge-native")
         badge.set_valign(Gtk.Align.CENTER)
         badge.set_tooltip_text(
-            "Есть код под этот процессор: пойдёт напрямую, без трансляции"
+            tr("Есть код под этот процессор: пойдёт напрямую, без трансляции")
             if native
-            else "Только ARM-код: пойдёт через трансляцию в контейнере"
+            else tr("Только ARM-код: пойдёт через трансляцию в контейнере")
         )
         box.append(badge)
 
@@ -134,6 +135,10 @@ class MerciWindow(Adw.ApplicationWindow):
         self.entries: list[Entry] = []
         self.selected: Entry | None = None
         self._busy = False  # идёт установка или запуск: второе нажатие не нужно
+        # Окно может быть заменено (смена языка) или закрыто, пока ответы
+        # фоновых запросов ещё в пути. Трогать виджеты уничтоженного окна
+        # нельзя — GTK на этом ругается, а то и падает.
+        self._closing = False
 
         self.tray = self._build_tray()
         # Со значком в трее крестик логично прячет окно, а не закрывает
@@ -158,21 +163,25 @@ class MerciWindow(Adw.ApplicationWindow):
 
     # -- построение интерфейса -------------------------------------------
 
+    def _tray_items(self) -> list[MenuItem]:
+        """Пункты меню трея. Отдельно от значка: при смене языка их надо
+        пересобрать, а сам значок и его регистрация остаются."""
+        return [
+            MenuItem(1, tr("Открыть Merci"), self.present_window),
+            MenuItem(2, "", separator=True),
+            MenuItem(3, tr("Открыть окно Android"), self._show_android_ui),
+            MenuItem(4, tr("Открыть запущенную игру"), self._raise_running_app),
+            MenuItem(5, "", separator=True),
+            MenuItem(6, tr("Включить Waydroid"), self._start_waydroid),
+            MenuItem(7, tr("Перезапустить Waydroid"), self._restart_waydroid),
+            MenuItem(8, tr("Выключить Waydroid"), self._stop_waydroid),
+            MenuItem(9, "", separator=True),
+            MenuItem(10, tr("Выйти из Merci"), self._quit_app),
+        ]
+
     def _build_tray(self) -> TrayIcon:
         """Значок в трее: левое нажатие открывает Merci, правое — это меню."""
-        items = [
-            MenuItem(1, "Открыть Merci", self.present_window),
-            MenuItem(2, "", separator=True),
-            MenuItem(3, "Открыть окно Android", self._show_android_ui),
-            MenuItem(4, "Открыть запущенную игру", self._raise_running_app),
-            MenuItem(5, "", separator=True),
-            MenuItem(6, "Включить Waydroid", self._start_waydroid),
-            MenuItem(7, "Перезапустить Waydroid", self._restart_waydroid),
-            MenuItem(8, "Выключить Waydroid", self._stop_waydroid),
-            MenuItem(9, "", separator=True),
-            MenuItem(10, "Выйти из Merci", self._quit_app),
-        ]
-        tray = TrayIcon(APP_ID, "Merci", items, self.present_window)
+        tray = TrayIcon(APP_ID, "Merci", self._tray_items(), self.present_window)
         tray.start()
         return tray
 
@@ -206,16 +215,16 @@ class MerciWindow(Adw.ApplicationWindow):
         entries = sorted(self.entries, key=lambda e: e.last_run, reverse=True)
         recent = next((e for e in entries if e.last_run), None)
         if recent is None:
-            self._toast("Нечего открывать: ещё ничего не запускали")
+            self._toast(tr("Нечего открывать: ещё ничего не запускали"))
             return
         self._launch_waydroid(recent)
 
     def _start_waydroid(self) -> None:
-        self._toast("Поднимаем контейнер…")
+        self._toast(tr("Поднимаем контейнер…"))
         hostexec.in_thread(
             waydroid.ensure_session,
             lambda _result, error: self._toast(
-                f"Не вышло: {error}" if error else "Контейнер запущен"
+                tr("Не вышло: {error}", error=error) if error else tr("Контейнер запущен")
             ),
         )
 
@@ -228,24 +237,24 @@ class MerciWindow(Adw.ApplicationWindow):
     def _build_sidebar(self) -> Adw.NavigationPage:
         header = Adw.HeaderBar()
         add_button = Gtk.Button(icon_name="list-add-symbolic")
-        add_button.set_tooltip_text("Добавить APK")
+        add_button.set_tooltip_text(tr("Добавить APK"))
         add_button.connect("clicked", lambda *_: self.choose_apk())
         header.pack_start(add_button)
 
         menu = Gio.Menu()
-        menu.append("Подготовить Waydroid", "win.waydroid-setup")
-        menu.append("Окно Android", "win.waydroid-ui")
-        menu.append("Выключить Waydroid", "win.waydroid-stop")
-        menu.append("Журнал сбоев Android", "win.waydroid-crash")
-        menu.append("Сменить транслятор ARM", "win.waydroid-bridge")
-        menu.append("Установить root (Magisk)", "win.waydroid-magisk")
-        menu.append("Убрать root (Magisk)", "win.waydroid-magisk-remove")
-        menu.append("Аппаратное ускорение NVIDIA", "win.waydroid-nvidia")
-        menu.append("Исправить мерцание картинки", "win.waydroid-flicker")
-        menu.append("Ссылки в браузере хоста", "win.waydroid-urls")
-        menu.append("Настройки", "win.settings")
-        menu.append("Папка библиотеки", "app.open-library")
-        menu.append("О программе", "app.about")
+        menu.append(tr("Подготовить Waydroid"), "win.waydroid-setup")
+        menu.append(tr("Окно Android"), "win.waydroid-ui")
+        menu.append(tr("Выключить Waydroid"), "win.waydroid-stop")
+        menu.append(tr("Журнал сбоев Android"), "win.waydroid-crash")
+        menu.append(tr("Сменить транслятор ARM"), "win.waydroid-bridge")
+        menu.append(tr("Установить root (Magisk)"), "win.waydroid-magisk")
+        menu.append(tr("Убрать root (Magisk)"), "win.waydroid-magisk-remove")
+        menu.append(tr("Аппаратное ускорение NVIDIA"), "win.waydroid-nvidia")
+        menu.append(tr("Исправить мерцание картинки"), "win.waydroid-flicker")
+        menu.append(tr("Ссылки в браузере хоста"), "win.waydroid-urls")
+        menu.append(tr("Настройки"), "win.settings")
+        menu.append(tr("Папка библиотеки"), "app.open-library")
+        menu.append(tr("О программе"), "app.about")
         header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
 
         for name, callback in (
@@ -274,8 +283,8 @@ class MerciWindow(Adw.ApplicationWindow):
 
         empty = Adw.StatusPage(
             icon_name="folder-download-symbolic",
-            title="Пусто",
-            description="Перетащите APK в окно",
+            title=tr("Пусто"),
+            description=tr("Перетащите APK в окно"),
         )
         empty.add_css_class("compact")
 
@@ -286,7 +295,7 @@ class MerciWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(header)
         box.append(self.sidebar_stack)
-        return Adw.NavigationPage(child=box, title="Библиотека")
+        return Adw.NavigationPage(child=box, title=tr("Библиотека"))
 
     def _build_content(self) -> Adw.NavigationPage:
         self.content_header = Adw.HeaderBar()
@@ -295,14 +304,14 @@ class MerciWindow(Adw.ApplicationWindow):
 
         self.welcome = Adw.StatusPage(
             icon_name="application-x-executable-symbolic",
-            title="Перетащите APK сюда",
+            title=tr("Перетащите APK сюда"),
             description=(
-                "Merci разберёт манифест и сам выберет, как запускать: "
+                tr("Merci разберёт манифест и сам выберет, как запускать: "
                 "APK с кодом под этот процессор идут внутри Merci, "
-                "APK только под ARM — через Waydroid."
+                "APK только под ARM — через Waydroid.")
             ),
         )
-        button = Gtk.Button(label="Выбрать файл…")
+        button = Gtk.Button(label=tr("Выбрать файл…"))
         button.add_css_class("suggested-action")
         button.add_css_class("pill")
         button.set_halign(Gtk.Align.CENTER)
@@ -327,7 +336,7 @@ class MerciWindow(Adw.ApplicationWindow):
         self.detail_subtitle = Gtk.Label(xalign=0.5)
         self.detail_subtitle.add_css_class("dim-label")
 
-        self.play_button = Gtk.Button(label="Запустить")
+        self.play_button = Gtk.Button(label=tr("Запустить"))
         self.play_button.add_css_class("suggested-action")
         self.play_button.add_css_class("pill")
         self.play_button.set_halign(Gtk.Align.CENTER)
@@ -336,7 +345,7 @@ class MerciWindow(Adw.ApplicationWindow):
         # Выключение стоит рядом с запуском: оно нужно сразу после игры, и
         # прокручивать за ним карточку неудобно.
         self.stop_button = Gtk.Button(icon_name="system-shutdown-symbolic")
-        self.stop_button.set_tooltip_text("Выключить Waydroid")
+        self.stop_button.set_tooltip_text(tr("Выключить Waydroid"))
         self.stop_button.add_css_class("circular")
         self.stop_button.add_css_class("flat")
         self.stop_button.set_valign(Gtk.Align.CENTER)
@@ -346,7 +355,7 @@ class MerciWindow(Adw.ApplicationWindow):
         # запущена, а сети у контейнера нет» — обычное дело сразу после
         # включения машины.
         self.restart_button = Gtk.Button(icon_name="view-refresh-symbolic")
-        self.restart_button.set_tooltip_text("Перезапустить Waydroid")
+        self.restart_button.set_tooltip_text(tr("Перезапустить Waydroid"))
         self.restart_button.add_css_class("circular")
         self.restart_button.add_css_class("flat")
         self.restart_button.set_valign(Gtk.Align.CENTER)
@@ -366,15 +375,15 @@ class MerciWindow(Adw.ApplicationWindow):
         hero.append(buttons)
 
         self.banner = Adw.Banner(revealed=False)
-        self.banner.set_button_label("Подготовить")
+        self.banner.set_button_label(tr("Подготовить"))
         self.banner.connect("button-clicked", lambda *_: self.show_installer())
 
-        self.info_group = Adw.PreferencesGroup(title="Сведения")
-        self.row_package = Adw.ActionRow(title="Пакет")
+        self.info_group = Adw.PreferencesGroup(title=tr("Сведения"))
+        self.row_package = Adw.ActionRow(title=tr("Пакет"))
         self.row_activity = Adw.ActionRow(title="Activity")
-        self.row_abi = Adw.ActionRow(title="Архитектура")
-        self.row_size = Adw.ActionRow(title="Занимает места")
-        self.row_last = Adw.ActionRow(title="Последний запуск")
+        self.row_abi = Adw.ActionRow(title=tr("Архитектура"))
+        self.row_size = Adw.ActionRow(title=tr("Занимает места"))
+        self.row_last = Adw.ActionRow(title=tr("Последний запуск"))
         for row in (
             self.row_package,
             self.row_activity,
@@ -385,11 +394,11 @@ class MerciWindow(Adw.ApplicationWindow):
             row.add_css_class("property")
             self.info_group.add(row)
 
-        runtime = Adw.PreferencesGroup(title="Запуск")
+        runtime = Adw.PreferencesGroup(title=tr("Запуск"))
 
         # Профиль — это отдельные данные одного и того же приложения: свой
         # вход, свой кеш. Так запускают второй аккаунт, не выходя из первого.
-        self.profile_row = Adw.ComboRow(title="Профиль Android")
+        self.profile_row = Adw.ComboRow(title=tr("Профиль Android"))
         self.profile_row.add_prefix(
             Gtk.Image.new_from_icon_name("system-users-symbolic")
         )
@@ -398,7 +407,7 @@ class MerciWindow(Adw.ApplicationWindow):
         self._syncing_profile = False
         runtime.add(self.profile_row)
 
-        self.build_row = Adw.ActionRow(title="Сборка в контейнере")
+        self.build_row = Adw.ActionRow(title=tr("Сборка в контейнере"))
         self.build_row.add_prefix(Gtk.Image.new_from_icon_name("package-x-generic-symbolic"))
         runtime.add(self.build_row)
 
@@ -409,27 +418,27 @@ class MerciWindow(Adw.ApplicationWindow):
         self.state_row.connect("activated", lambda *_: self.show_installer())
         runtime.add(self.state_row)
 
-        self.bridge_row = Adw.ActionRow(title="Трансляция ARM64 → x86_64")
+        self.bridge_row = Adw.ActionRow(title=tr("Трансляция ARM64 → x86_64"))
         self.bridge_row.add_prefix(Gtk.Image.new_from_icon_name("system-switch-user-symbolic"))
         runtime.add(self.bridge_row)
 
-        self.resolution_row = Adw.EntryRow(title="Разрешение окна (напр. 1600x900)")
+        self.resolution_row = Adw.EntryRow(title=tr("Разрешение окна (напр. 1600x900)"))
         self.resolution_row.set_show_apply_button(True)
         self.resolution_row.connect("apply", self._on_resolution_applied)
         fit = Gtk.Button(icon_name="video-display-symbolic")
-        fit.set_tooltip_text("Подставить размер монитора")
+        fit.set_tooltip_text(tr("Подставить размер монитора"))
         fit.set_valign(Gtk.Align.CENTER)
         fit.add_css_class("flat")
         fit.connect("clicked", lambda *_: self._fill_monitor_size())
         self.resolution_row.add_suffix(fit)
         runtime.add(self.resolution_row)
 
-        self.renderer_row = Adw.ActionRow(title="Рендер контейнера")
+        self.renderer_row = Adw.ActionRow(title=tr("Рендер контейнера"))
         self.renderer_row.add_prefix(Gtk.Image.new_from_icon_name("video-display-symbolic"))
         runtime.add(self.renderer_row)
 
         ui_row = Adw.ActionRow(
-            title="Открыть окно Android", subtitle="Полный рабочий стол контейнера"
+            title=tr("Открыть окно Android"), subtitle=tr("Полный рабочий стол контейнера")
         )
         ui_row.set_activatable(True)
         ui_row.add_prefix(Gtk.Image.new_from_icon_name("video-display-symbolic"))
@@ -439,15 +448,15 @@ class MerciWindow(Adw.ApplicationWindow):
         # Выключение — прямо в карточке: чаще всего оно нужно сразу после
         # игры, и лезть за ним в меню неудобно.
         self.restart_row = Adw.ActionRow(
-            title="Перезапустить Waydroid",
-            subtitle="если контейнер запущен, а сети у него нет",
+            title=tr("Перезапустить Waydroid"),
+            subtitle=tr("если контейнер запущен, а сети у него нет"),
         )
         self.restart_row.set_activatable(True)
         self.restart_row.add_prefix(Gtk.Image.new_from_icon_name("view-refresh-symbolic"))
         self.restart_row.connect("activated", lambda *_: self._restart_waydroid())
         runtime.add(self.restart_row)
 
-        self.stop_row = Adw.ActionRow(title="Выключить Waydroid")
+        self.stop_row = Adw.ActionRow(title=tr("Выключить Waydroid"))
         self.stop_row.set_activatable(True)
         self.stop_row.add_css_class("error")
         self.stop_row.add_prefix(
@@ -456,9 +465,9 @@ class MerciWindow(Adw.ApplicationWindow):
         self.stop_row.connect("activated", lambda *_: self._stop_waydroid())
         runtime.add(self.stop_row)
 
-        actions = Adw.PreferencesGroup(title="Управление")
+        actions = Adw.PreferencesGroup(title=tr("Управление"))
         remove_row = Adw.ActionRow(
-            title="Удалить из библиотеки", subtitle="APK и все его данные"
+            title=tr("Удалить из библиотеки"), subtitle=tr("APK и все его данные")
         )
         remove_row.set_activatable(True)
         remove_row.add_css_class("error")
@@ -466,8 +475,8 @@ class MerciWindow(Adw.ApplicationWindow):
         remove_row.connect("activated", lambda *_: self._confirm_remove())
 
         self.uninstall_row = Adw.ActionRow(
-            title="Удалить из контейнера",
-            subtitle="снять установку в Waydroid, запись в библиотеке останется",
+            title=tr("Удалить из контейнера"),
+            subtitle=tr("снять установку в Waydroid, запись в библиотеке останется"),
         )
         self.uninstall_row.set_activatable(True)
         self.uninstall_row.add_prefix(
@@ -533,15 +542,15 @@ class MerciWindow(Adw.ApplicationWindow):
 
         self.detail_title.set_text(entry.name)
         self.detail_subtitle.set_text(
-            f"версия {entry.version}" if entry.version else entry.package
+            tr("версия {version}", version=entry.version) if entry.version else entry.package
         )
 
         self.row_package.set_subtitle(entry.package or "—")
-        self.row_activity.set_subtitle(entry.activity or "по умолчанию")
+        self.row_activity.set_subtitle(entry.activity or tr("по умолчанию"))
         self.row_abi.set_subtitle(
             ", ".join(_ABI_LABEL.get(a, a) for a in entry.abis)
             if entry.abis
-            else "без нативного кода"
+            else tr("без нативного кода")
         )
         self.row_size.set_subtitle(_human_size(entry.size_bytes()))
         self.row_last.set_subtitle(_human_time(entry.last_run))
@@ -576,27 +585,28 @@ class MerciWindow(Adw.ApplicationWindow):
     def _fill_monitor_size(self) -> None:
         width, height = self._monitor_size()
         if not width:
-            self._toast("Не удалось определить размер монитора")
+            self._toast(tr("Не удалось определить размер монитора"))
             return
         self.resolution_row.set_text(f"{width}x{height}")
-        self._toast(f"Подставил {width}x{height} — нажмите галочку, чтобы применить")
+        self._toast(tr("Подставил {w}x{h} — нажмите галочку, чтобы применить",
+                       w=width, h=height))
 
     def _on_resolution_applied(self, row: Adw.EntryRow) -> None:
         entry = self.selected
         if entry is None:
             return
 
-        text = row.get_text().strip().lower().replace("х", "x").replace("*", "x")
+        text = row.get_text().strip().lower().replace(tr("х"), "x").replace("*", "x")
         width = height = 0
         if text:
             try:
                 width, height = (int(part) for part in text.split("x"))
             except ValueError:
-                self._toast("Разрешение задаётся как 1600x900")
+                self._toast(tr("Разрешение задаётся как 1600x900"))
                 self._refresh_resolution(entry)
                 return
             if not (320 <= width <= 7680 and 240 <= height <= 4320):
-                self._toast("Слишком странное разрешение")
+                self._toast(tr("Слишком странное разрешение"))
                 self._refresh_resolution(entry)
                 return
 
@@ -609,20 +619,21 @@ class MerciWindow(Adw.ApplicationWindow):
             self._offer_gamescope(width, height)
             return
 
-        self._toast("Перезапускаем контейнер…")
+        self._toast(tr("Перезапускаем контейнер…"))
         row.set_sensitive(False)
 
         def done(error, stretched):
             row.set_sensitive(True)
             if error is not None:
-                self._error("Не удалось настроить дисплей", str(error))
+                self._error(tr("Не удалось настроить дисплей"), str(error))
                 return
             if not width:
-                self._toast("Готово: размер сброшен")
+                self._toast(tr("Готово: размер сброшен"))
             elif stretched:
-                self._toast(f"Готово: рендер {width}x{height} растянут на экран")
+                self._toast(tr("Готово: рендер {w}x{h} растянут на экран",
+                               w=width, h=height))
             else:
-                self._toast(f"Готово: контейнер в {width}x{height}")
+                self._toast(tr("Готово: контейнер в {w}x{h}", w=width, h=height))
             self._refresh_runtime_state(entry)
 
         waydroid.set_display_async(width, height, monitor, done)
@@ -630,14 +641,17 @@ class MerciWindow(Adw.ApplicationWindow):
     def _offer_gamescope(self, width: int, height: int) -> None:
         """Без gamescope растянуть нечем: Waydroid своё окно не масштабирует."""
         dialog = Adw.AlertDialog(
-            heading="Нужен gamescope",
-            body=f"Чтобы рисовать в {width}x{height} и занимать весь экран, "
-            "контейнер запускается внутри gamescope — он и растягивает "
-            "картинку. Waydroid сам этого не умеет: его окно всегда равно "
-            "разрешению контейнера.\n\nПоставить gamescope из репозитория?",
+            heading=tr("Нужен gamescope"),
+            body=tr(
+                "Чтобы рисовать в {w}x{h} и занимать весь экран, "
+                "контейнер запускается внутри gamescope — он и растягивает "
+                "картинку. Waydroid сам этого не умеет: его окно всегда равно "
+                "разрешению контейнера.\n\nПоставить gamescope из репозитория?",
+                w=width, h=height,
+            ),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("install", "Установить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("install", tr("Установить"))
         dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -650,7 +664,7 @@ class MerciWindow(Adw.ApplicationWindow):
         """Обновляет строки состояния. Хост опрашивается в потоке —
         обработчик выбора приложения обязан возвращаться мгновенно."""
         self.resolution_row.set_title(
-            "Разрешение рендера, растянется на монитор (напр. 1600x900)"
+            tr("Разрешение рендера, растянется на монитор (напр. 1600x900)")
         )
         # Трансляция важна только для ARM-кода: у APK с x86 в контейнере
         # она не участвует, и строка сбивала бы с толку.
@@ -660,26 +674,26 @@ class MerciWindow(Adw.ApplicationWindow):
         # всегда основной, и строка была бы шумом.
         self.profile_row.set_visible(self.settings.multiuser)
         if self.settings.multiuser:
-            self.profile_row.set_subtitle("спрашиваем контейнер…")
+            self.profile_row.set_subtitle(tr("спрашиваем контейнер…"))
             slug = entry.slug
             hostexec.in_thread(
                 waydroid.android_users,
                 lambda result, error: self._show_profiles(slug, result, error),
             )
-        self.stop_row.set_subtitle("проверяем состояние…")
-        self.state_row.set_subtitle("проверяем…")
+        self.stop_row.set_subtitle(tr("проверяем состояние…"))
+        self.state_row.set_subtitle(tr("проверяем…"))
 
-        self.build_row.set_subtitle("спрашиваем контейнер…")
+        self.build_row.set_subtitle(tr("спрашиваем контейнер…"))
         slug = entry.slug
         hostexec.in_thread(
             lambda: waydroid.installed_build(entry.package),
             lambda result, error: self._show_build(slug, result, error),
         )
-        self.bridge_row.set_subtitle("проверяем…")
+        self.bridge_row.set_subtitle(tr("проверяем…"))
         self.play_button.set_sensitive(False)
 
         self.renderer_row.set_visible(True)
-        self.renderer_row.set_subtitle("проверяем…")
+        self.renderer_row.set_subtitle(tr("проверяем…"))
         hostexec.in_thread(
             waydroid.renderer,
             lambda result, _error: self._show_renderer(result),
@@ -695,51 +709,55 @@ class MerciWindow(Adw.ApplicationWindow):
         Сверяем сам файл — начало sha256 у нас в ключе записи, и ровно его
         же можно получить от контейнера.
         """
+        if self._closing:
+            return
         entry = self.selected
         if entry is None or entry.slug != slug:
             return
         if error is not None or not result:
-            self.build_row.set_subtitle("контейнер не ответил")
+            self.build_row.set_subtitle(tr("контейнер не ответил"))
             return
         digest, version = result
         if digest is None:
             # Неполученный ответ — не «не установлена»: путать эти два
             # состояния значит показывать уверенную неправду.
             self.build_row.set_subtitle(
-                "спросить не удалось — контейнер не ответил"
+                tr("спросить не удалось — контейнер не ответил")
                 if waydroid.adb_available()
-                else "проверить нечем: adb появится вместе с MultiUser"
+                else tr("проверить нечем: adb появится вместе с MultiUser")
             )
             return
         if not digest:
-            self.build_row.set_subtitle("не установлена — поставится при запуске")
+            self.build_row.set_subtitle(tr("не установлена — поставится при запуске"))
             return
         if entry.file_hash and digest == entry.file_hash:
-            self.build_row.set_subtitle("эта — можно запускать")
+            self.build_row.set_subtitle(tr("эта — можно запускать"))
             return
         self.build_row.set_subtitle(
-            f"другая{f' (версия {version})' if version else ''} — при запуске "
-            "Merci предложит заменить"
+            tr("другая{version} — при запуске Merci предложит заменить",
+               version=tr(" (версия {v})", v=version) if version else "")
         )
 
     def _show_profiles(self, slug: str, users, error) -> None:
         """Ответ контейнера о профилях. Карточка могла смениться — проверяем."""
+        if self._closing:
+            return
         entry = self.selected
         if entry is None or entry.slug != slug:
             return
         if error is not None or users is None:
-            self.profile_row.set_subtitle(f"контейнер не ответил: {error}")
+            self.profile_row.set_subtitle(tr("контейнер не ответил: {error}", error=error))
             return
 
         values = [0] + sorted(n for n in users if n > 0)
         labels = [
-            "основной" if n == 0 else f"№{n} — {users.get(n, 'профиль')}"
+            tr("основной") if n == 0 else tr("№{n} — {name}", n=n, name=users.get(n, tr("профиль")))
             for n in values
         ]
         # Отрицательное значение — «завести новый»: номер выдаёт Android,
         # заранее его не угадать.
         values.append(-1)
-        labels.append("Новый профиль…")
+        labels.append(tr("Новый профиль…"))
 
         current = entry.profile if entry.profile in values else 0
         self._syncing_profile = True
@@ -750,9 +768,9 @@ class MerciWindow(Adw.ApplicationWindow):
         finally:
             self._syncing_profile = False
         self.profile_row.set_subtitle(
-            "свои данные приложения: вход, кеш, настройки"
+            tr("свои данные приложения: вход, кеш, настройки")
             if current
-            else "общие данные приложения"
+            else tr("общие данные приложения")
         )
 
     def _on_profile_changed(self, *_args) -> None:
@@ -774,7 +792,7 @@ class MerciWindow(Adw.ApplicationWindow):
 
         # Новый профиль заводит сам Android, и это разговор с контейнером.
         self.profile_row.set_sensitive(False)
-        self.profile_row.set_subtitle("заводим профиль…")
+        self.profile_row.set_subtitle(tr("заводим профиль…"))
         slug = entry.slug
 
         def done(number, error) -> None:
@@ -783,46 +801,50 @@ class MerciWindow(Adw.ApplicationWindow):
             if fresh is None or fresh.slug != slug:
                 return
             if error is not None:
-                self._error("Профиль не завёлся", str(error))
+                self._error(tr("Профиль не завёлся"), str(error))
                 self._refresh_runtime_state(fresh)
                 return
             fresh.android_user = number
             self.library.save(fresh)
-            self._toast(f"Готов профиль №{number}")
+            self._toast(tr("Готов профиль №{n}", n=number))
             self._refresh_runtime_state(fresh)
 
         hostexec.in_thread(lambda: waydroid.create_android_user(entry.name), done)
 
     def _show_renderer(self, result) -> None:
-        text, hardware = result or ("состояние неизвестно", False)
+        if self._closing:
+            return
+        text, hardware = result or (tr("состояние неизвестно"), False)
         self.renderer_row.set_subtitle(
             text
             if hardware
-            else f"{text}. Меньше разрешение — выше частота кадров"
+            else tr("{text}. Меньше разрешение — выше частота кадров", text=text)
         )
 
     def _apply_state(
         self, slug: str, ready: bool, detail: str, bridge: str, network: bool = True
     ) -> None:
         """Ответ хоста пришёл. Если пользователь успел выбрать другое
-        приложение, ответ уже неинтересен."""
+        приложение — или окно вовсе закрылось, — ответ уже неинтересен."""
+        if self._closing:
+            return
         entry = self.selected
         if entry is None or entry.slug != slug:
             return
 
         self.state_row.set_subtitle(
-            "сессия запущена" if ready else f"{detail} — нажмите, чтобы подготовить"
+            tr("сессия запущена") if ready else tr("{detail} — нажмите, чтобы подготовить", detail=detail)
         )
         # Выключать нечего, если контейнер и так не работает.
         self.stop_row.set_sensitive(ready)
         self.stop_button.set_sensitive(ready)
         self.stop_row.set_subtitle(
-            "контейнер работает — остановить его и все приложения в нём"
+            tr("контейнер работает — остановить его и все приложения в нём")
             if ready
-            else "контейнер не запущен"
+            else tr("контейнер не запущен")
         )
         self.bridge_row.set_subtitle(
-            bridge if bridge else "не настроена — arm64-APK Waydroid не примет"
+            bridge if bridge else tr("не настроена — arm64-APK Waydroid не примет")
         )
 
         # Без трансляции нельзя запустить только ARM-код. APK с x86 внутри
@@ -832,13 +854,13 @@ class MerciWindow(Adw.ApplicationWindow):
         blocked = not ready or (needs_bridge and not bridge)
         if blocked:
             self.banner.set_title(
-                f"Waydroid не готов: {detail}"
+                tr("Waydroid не готов: {detail}", detail=detail)
                 if not ready
-                else "Нужна трансляция ARM64 → x86_64 (libndk)"
+                else tr("Нужна трансляция ARM64 → x86_64 (libndk)")
             )
         elif not network:
             # Запускать можно, но приложение останется без сети.
-            self.banner.set_title("Контейнер без доступа в интернет: мешает ufw")
+            self.banner.set_title(tr("Контейнер без доступа в интернет: мешает ufw"))
         self.banner.set_revealed(blocked or not network)
         if not self._busy:
             self.play_button.set_sensitive(not blocked)
@@ -846,9 +868,9 @@ class MerciWindow(Adw.ApplicationWindow):
     # -- действия ----------------------------------------------------------
 
     def choose_apk(self) -> None:
-        dialog = Gtk.FileDialog(title="Выберите APK")
+        dialog = Gtk.FileDialog(title=tr("Выберите APK"))
         apk_filter = Gtk.FileFilter()
-        apk_filter.set_name("Android-приложения (*.apk)")
+        apk_filter.set_name(tr("Android-приложения (*.apk)"))
         apk_filter.add_pattern("*.apk")
         filters = Gio.ListStore.new(Gtk.FileFilter)
         filters.append(apk_filter)
@@ -867,7 +889,7 @@ class MerciWindow(Adw.ApplicationWindow):
     def _on_drop(self, _target, value, _x, _y) -> bool:
         paths = [f.get_path() for f in value.get_files() if f.get_path()]
         if not paths:
-            self._toast("Такой источник перетащить нельзя — выберите файл вручную")
+            self._toast(tr("Такой источник перетащить нельзя — выберите файл вручную"))
             return False
         for path in paths:
             self.import_apk(path)
@@ -875,12 +897,12 @@ class MerciWindow(Adw.ApplicationWindow):
 
     def import_apk(self, path: str) -> None:
         if not path.lower().endswith(".apk"):
-            self._toast(f"{os.path.basename(path)}: это не APK")
+            self._toast(tr("{file}: это не APK", file=os.path.basename(path)))
             return
 
         progress = Adw.AlertDialog(
-            heading="Добавляем APK",
-            body=f"{os.path.basename(path)} копируется в библиотеку…",
+            heading=tr("Добавляем APK"),
+            body=tr("{file} копируется в библиотеку…", file=os.path.basename(path)),
         )
         progress.present(self)
 
@@ -889,11 +911,11 @@ class MerciWindow(Adw.ApplicationWindow):
                 entry = self.library.add(path)
             except apk.ApkError as exc:
                 progress.close()
-                self._error("Не получилось добавить APK", str(exc))
+                self._error(tr("Не получилось добавить APK"), str(exc))
                 return False
             except OSError as exc:
                 progress.close()
-                self._error("Ошибка файловой системы", str(exc))
+                self._error(tr("Ошибка файловой системы"), str(exc))
                 return False
             progress.close()
             # Пакет уже есть в библиотеке — значит это вторая сборка того же
@@ -909,11 +931,12 @@ class MerciWindow(Adw.ApplicationWindow):
                 # одну установку на всё устройство. При запуске Merci
                 # предложит заменить — это единственное, что тут возможно.
                 self._toast(
-                    f"{entry.name}: пакет {entry.package} уже занят — "
-                    "при запуске Merci предложит заменить установку"
+                    tr("{name}: пакет {package} уже занят — "
+                       "при запуске Merci предложит заменить установку",
+                       name=entry.name, package=entry.package)
                 )
             else:
-                self._toast(f"{entry.name} добавлено")
+                self._toast(tr("{name} добавлено", name=entry.name))
             return False
 
         # Копирование блокирующее, но сначала нужно показать диалог.
@@ -936,7 +959,7 @@ class MerciWindow(Adw.ApplicationWindow):
         self.refresh()
 
     def _update_play_button(self) -> None:
-        self.play_button.set_label("Запустить")
+        self.play_button.set_label(tr("Запустить"))
         self.play_button.remove_css_class("destructive-action")
         self.play_button.add_css_class("suggested-action")
 
@@ -949,12 +972,12 @@ class MerciWindow(Adw.ApplicationWindow):
             return  # второе нажатие запустило бы параллельную установку
         self._busy = True
         self.play_button.set_sensitive(False)
-        self.play_button.set_label("Готовим…")
-        self._toast(f"{entry.name} уходит в Waydroid")
+        self.play_button.set_label(tr("Готовим…"))
+        self._toast(tr("{name} уходит в Waydroid", name=entry.name))
 
         def done(error) -> None:
             self._busy = False
-            self.play_button.set_label("Запустить")
+            self.play_button.set_label(tr("Запустить"))
             self.play_button.set_sensitive(True)
             if isinstance(error, waydroid.ContainerUnreachable):
                 self._offer_container_restart(str(error))
@@ -968,7 +991,7 @@ class MerciWindow(Adw.ApplicationWindow):
             entry.last_run = time.time()
             self.library.save(entry)
             self.row_last.set_subtitle(_human_time(entry.last_run))
-            self._toast("Окно откроет Waydroid")
+            self._toast(tr("Окно откроет Waydroid"))
             if self.settings.minimize_on_launch:
                 # Библиотека нужна была до нажатия; поверх игры она лишняя.
                 GLib.timeout_add_seconds(2, lambda: (self.hide_to_tray(), False)[1])
@@ -1001,19 +1024,22 @@ class MerciWindow(Adw.ApplicationWindow):
         могут — ни в каком профиле. Остаётся заменить.
         """
         twins = self.library.package_conflicts(entry.package, exclude=entry.slug)
-        other = f"«{twins[0].name}»" if twins else "другая сборка"
+        other = f"«{twins[0].name}»" if twins else tr("другая сборка")
         dialog = Adw.AlertDialog(
-            heading="В контейнере другая сборка этого приложения",
-            body=f"Пакет {entry.package} уже занят: там стоит {other}. "
-            "Android держит одно имя пакета как одну установку на всё "
-            "устройство — профили делят между собой код приложения и "
-            "различаются только данными, поэтому две разные сборки рядом "
-            "не живут.\n\nЗаменить установку на «"
-            f"{entry.name}»? Данные прежней сборки внутри Android будут "
-            "стёрты — так требует Android при смене подписи.",
+            heading=tr("В контейнере другая сборка этого приложения"),
+            body=tr(
+                "Пакет {package} уже занят: там стоит {other}. "
+                "Android держит одно имя пакета как одну установку на всё "
+                "устройство — профили делят между собой код приложения и "
+                "различаются только данными, поэтому две разные сборки рядом "
+                "не живут.\n\nЗаменить установку на «{name}»? Данные прежней "
+                "сборки внутри Android будут стёрты — так требует Android при "
+                "смене подписи.",
+                package=entry.package, other=other, name=entry.name,
+            ),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("replace", "Заменить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("replace", tr("Заменить"))
         dialog.set_response_appearance("replace", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.connect("response", self._on_replace_response, entry)
         dialog.present(self)
@@ -1026,7 +1052,7 @@ class MerciWindow(Adw.ApplicationWindow):
 
         def done(error) -> None:
             self._busy = False
-            self.play_button.set_label("Запустить")
+            self.play_button.set_label(tr("Запустить"))
             self.play_button.set_sensitive(True)
             if error is not None:
                 self._launch_failed(str(error))
@@ -1034,7 +1060,7 @@ class MerciWindow(Adw.ApplicationWindow):
             entry.last_run = time.time()
             self.library.save(entry)
             self.row_last.set_subtitle(_human_time(entry.last_run))
-            self._toast(f"{entry.name}: установка заменена, открываем")
+            self._toast(tr("{name}: установка заменена, открываем", name=entry.name))
             if self.settings.minimize_on_launch:
                 GLib.timeout_add_seconds(2, lambda: (self.hide_to_tray(), False)[1])
 
@@ -1047,11 +1073,11 @@ class MerciWindow(Adw.ApplicationWindow):
 
     def _launch_failed(self, message: str) -> None:
         dialog = Adw.AlertDialog(
-            heading="Waydroid не запустил APK",
-            body=f"{message}\n\nОткрыть проверку готовности?",
+            heading=tr("Waydroid не запустил APK"),
+            body=tr("{message}\n\nОткрыть проверку готовности?", message=message),
         )
-        dialog.add_response("close", "Закрыть")
-        dialog.add_response("setup", "Подготовить")
+        dialog.add_response("close", tr("Закрыть"))
+        dialog.add_response("setup", tr("Подготовить"))
         dialog.set_response_appearance("setup", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_default_response("setup")
         dialog.connect("response", lambda _d, r: r == "setup" and self.show_installer())
@@ -1065,10 +1091,10 @@ class MerciWindow(Adw.ApplicationWindow):
             return
         translator = "libndk" in summary or "houdini" in summary
         toast = Adw.Toast(
-            title="Приложение упало внутри транслятора"
+            title=tr("Приложение упало внутри транслятора")
             if translator
-            else "Приложение упало после запуска",
-            button_label="Подробности",
+            else tr("Приложение упало после запуска"),
+            button_label=tr("Подробности"),
             timeout=8,
         )
         toast.connect("button-clicked", lambda *_: self._show_crash_log())
@@ -1080,13 +1106,16 @@ class MerciWindow(Adw.ApplicationWindow):
         target = "libhoudini" if current == "libndk" else "libndk"
 
         dialog = Adw.AlertDialog(
-            heading=f"Переключить на {target}?",
-            body=f"Сейчас стоит {current or 'ничего'}. Если приложение падает внутри "
-            "транслятора, второй вариант иногда справляется. Займёт несколько "
-            "минут и потребует пароль.",
+            heading=tr("Переключить на {target}?", target=target),
+            body=tr(
+                "Сейчас стоит {current}. Если приложение падает внутри "
+                "транслятора, второй вариант иногда справляется. Займёт несколько "
+                "минут и потребует пароль.",
+                current=current or tr("ничего"),
+            ),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("switch", "Переключить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("switch", tr("Переключить"))
         dialog.set_response_appearance("switch", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -1099,21 +1128,21 @@ class MerciWindow(Adw.ApplicationWindow):
     def _install_urlforward(self) -> None:
         """Ссылки из Android — в браузер хоста."""
         if waydroid.urlforward_installed():
-            self._toast("Перехватчик ссылок уже установлен")
+            self._toast(tr("Перехватчик ссылок уже установлен"))
             return
 
         dialog = Adw.AlertDialog(
-            heading="Открывать ссылки на компьютере?",
-            body="Сейчас ссылка из приложения открывается браузером самого "
+            heading=tr("Открывать ссылки на компьютере?"),
+            body=tr("Сейчас ссылка из приложения открывается браузером самого "
             "Android: передачи ссылок из контейнера на хост в Waydroid нет — "
             "это открытая заявка waydroid#210.\n\n"
             "Merci соберёт маленькое Android-приложение, которое ловит ссылку "
             "и отдаёт её службе на хосте, а та открывает её вашим браузером. "
             "Для сборки нужны JDK и инструменты Android SDK — Merci поставит "
-            "их сама. Займёт несколько минут и потребует пароль.",
+            "их сама. Займёт несколько минут и потребует пароль."),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("install", "Собрать и установить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("install", tr("Собрать и установить"))
         dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -1125,21 +1154,21 @@ class MerciWindow(Adw.ApplicationWindow):
     def _fix_flicker(self) -> None:
         """Мерцание из-за синхронных подповерхностей Wayland."""
         if not waydroid.subsurface_flicker():
-            self._toast("Подповерхности уже выключены — эта причина исключена")
+            self._toast(tr("Подповерхности уже выключены — эта причина исключена"))
             return
 
         dialog = Adw.AlertDialog(
-            heading="Исправить мерцание?",
-            body="Android-слои сейчас рисуются в подповерхностях Wayland. "
+            heading=tr("Исправить мерцание?"),
+            body=tr("Android-слои сейчас рисуются в подповерхностях Wayland. "
             "Синхронная подповерхность показывается только когда коммитит "
             "родительская поверхность, поэтому кадр замирает и обновляется "
             "лишь на события: нажатие клавиши, вход курсора в окно, "
             "появление экранной клавиатуры.\n\n"
             "Merci выключит этот режим в обоих файлах настроек и перезапустит "
-            "контейнер. Потребуется пароль.",
+            "контейнер. Потребуется пароль."),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("fix", "Исправить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("fix", tr("Исправить"))
         dialog.set_response_appearance("fix", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -1152,22 +1181,25 @@ class MerciWindow(Adw.ApplicationWindow):
         """Аппаратное ускорение контейнера на видеокартах NVIDIA."""
         ready, detail = waydroid.nvidia_ready()
         if not ready:
-            self._error("Не подходит для этой машины", detail)
+            self._error(tr("Не подходит для этой машины"), detail)
             return
 
         refresh = self._monitor_refresh()
         dialog = Adw.AlertDialog(
-            heading="Включить аппаратное ускорение?",
-            body="Сейчас контейнер рисует процессором: Waydroid ходит в Mesa, "
-            "а Mesa не умеет проприетарный драйвер NVIDIA.\n\n"
-            "waydroid-nvidia подставляет гостю Mesa Venus и проксирует Vulkan "
-            f"в настоящий драйвер ({detail}), так что рисует видеокарта.\n\n"
-            "Пакет waydroid будет заменён на waydroid-nvidia-bin — это тот же "
-            "Waydroid с патчами, образ Android и данные остаются на месте. "
-            f"Частота обновления возьмётся из монитора: {refresh} Гц.",
+            heading=tr("Включить аппаратное ускорение?"),
+            body=tr(
+                "Сейчас контейнер рисует процессором: Waydroid ходит в Mesa, "
+                "а Mesa не умеет проприетарный драйвер NVIDIA.\n\n"
+                "waydroid-nvidia подставляет гостю Mesa Venus и проксирует Vulkan "
+                "в настоящий драйвер ({detail}), так что рисует видеокарта.\n\n"
+                "Пакет waydroid будет заменён на waydroid-nvidia-bin — это тот же "
+                "Waydroid с патчами, образ Android и данные остаются на месте. "
+                "Частота обновления возьмётся из монитора: {refresh} Гц.",
+                detail=detail, refresh=refresh,
+            ),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("install", "Включить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("install", tr("Включить"))
         dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -1193,15 +1225,15 @@ class MerciWindow(Adw.ApplicationWindow):
     def _install_magisk(self) -> None:
         """Root в контейнере: обычная возможность своего же Android."""
         dialog = Adw.AlertDialog(
-            heading="Установить root в контейнере?",
-            body="Magisk Delta даст root внутри Waydroid — это ваш собственный "
+            heading=tr("Установить root в контейнере?"),
+            body=tr("Magisk Delta даст root внутри Waydroid — это ваш собственный "
             "Android, так что доступ к системным разделам и модулям тут "
             "нормальная вещь.\n\nПроверку устройства играми это не проходит: "
             "для них контейнер с root выглядит наоборот подозрительнее. "
-            "Займёт несколько минут и потребует пароль.",
+            "Займёт несколько минут и потребует пароль."),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("install", "Установить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("install", tr("Установить"))
         dialog.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -1211,13 +1243,13 @@ class MerciWindow(Adw.ApplicationWindow):
 
     def _remove_magisk(self) -> None:
         dialog = Adw.AlertDialog(
-            heading="Убрать root из контейнера?",
-            body="Magisk Delta будет снят, контейнер перезапустится. Модули, "
+            heading=tr("Убрать root из контейнера?"),
+            body=tr("Magisk Delta будет снят, контейнер перезапустится. Модули, "
             "которые вы через него ставили, перестанут работать.\n\n"
-            "Займёт несколько минут и потребует пароль.",
+            "Займёт несколько минут и потребует пароль."),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("remove", "Убрать")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("remove", tr("Убрать"))
         dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.connect(
             "response",
@@ -1231,30 +1263,30 @@ class MerciWindow(Adw.ApplicationWindow):
     def _show_settings(self) -> None:
         page = Adw.PreferencesPage()
         group = Adw.PreferencesGroup(
-            title="Профили Android",
-            description="Профили Android дают одному приложению отдельные "
+            title=tr("Профили Android"),
+            description=tr("Профили Android дают одному приложению отдельные "
             "данные: свой вход, свой кеш, свои настройки. Так запускают "
             "второй аккаунт, не выходя из первого.\n\n"
             "Двух разных сборок одного пакета это не даёт и дать не может: "
             "имя пакета для Android — одна установка на всё устройство, "
-            "профили делят между собой код приложения.",
+            "профили делят между собой код приложения."),
         )
 
         self.multiuser_row = Adw.SwitchRow(
-            title="Использовать MultiUser",
-            subtitle="в карточке появится выбор профиля; контейнер "
-            "переключается на нужный при запуске",
+            title=tr("Использовать MultiUser"),
+            subtitle=tr("в карточке появится выбор профиля; контейнер "
+            "переключается на нужный при запуске"),
         )
         self.multiuser_row.set_active(self.settings.multiuser)
         self.multiuser_row.connect("notify::active", self._on_multiuser_toggled)
         group.add(self.multiuser_row)
         page.add(group)
 
-        window_group = Adw.PreferencesGroup(title="Окно")
+        window_group = Adw.PreferencesGroup(title=tr("Окно"))
         self.minimize_row = Adw.SwitchRow(
-            title="Сворачивать Merci при запуске приложения",
-            subtitle="окно прячется в трей через пару секунд после запуска; "
-            "вернуть — нажатием на значок",
+            title=tr("Сворачивать Merci при запуске приложения"),
+            subtitle=tr("окно прячется в трей через пару секунд после запуска; "
+            "вернуть — нажатием на значок"),
         )
         self.minimize_row.set_active(self.settings.minimize_on_launch)
         self.minimize_row.connect(
@@ -1262,11 +1294,69 @@ class MerciWindow(Adw.ApplicationWindow):
             lambda row, _p: setattr(self.settings, "minimize_on_launch", row.get_active()),
         )
         window_group.add(self.minimize_row)
+
+        # Язык первым в списке было бы логичнее, но группа «Окно» уже есть,
+        # а заводить ради одной строки третью — лишний шум.
+        self.language_row = Adw.ComboRow(
+            title=tr("Язык интерфейса"),
+            subtitle=tr("сохраняется; окно перерисуется сразу"),
+        )
+        self._language_codes = list(LANGUAGES)
+        self.language_row.set_model(
+            Gtk.StringList.new([LANGUAGES[code] for code in self._language_codes])
+        )
+        current = self.settings.language
+        self.language_row.set_selected(
+            self._language_codes.index(current) if current in self._language_codes else 0
+        )
+        self.language_row.connect("notify::selected", self._on_language_changed)
+        window_group.add(self.language_row)
+
         page.add(window_group)
 
         dialog = Adw.PreferencesDialog()
         dialog.add(page)
+        # Ссылку держим: при смене языка окно пересобирается, и открытый
+        # диалог остался бы висеть без родителя — GTK на это ругается.
+        self._settings_dialog = dialog
         dialog.present(self)
+
+    def _on_language_changed(self, row, _param) -> None:
+        """Смена языка. Текст у виджетов задан при постройке, поэтому окно
+        собирается заново — иначе половина надписей осталась бы на старом
+        языке до перезапуска."""
+        index = row.get_selected()
+        if index >= len(self._language_codes):
+            return
+        code = self._language_codes[index]
+        if code == self.settings.language:
+            return
+        self.settings.language = code
+        set_language(code)
+
+        dialog = getattr(self, "_settings_dialog", None)
+        if dialog is not None:
+            dialog.close()
+            self._settings_dialog = None
+
+        # Через idle_add: обработчик пришёл из сигнала строки выбора, а она
+        # живёт в том самом содержимом, которое сейчас будет заменено.
+        GLib.idle_add(self.apply_language)
+
+    def apply_language(self) -> bool:
+        """Перерисовывает окно на новом языке.
+
+        Содержимое пересобирается прямо в этом окне, а не в новом: текст у
+        виджетов задаётся при постройке, но уничтожать окно ради этого
+        нельзя — GTK при разборе окна с открытыми диалогами и висящими
+        ответами хоста роняет весь процесс.
+        """
+        selected = self.selected.slug if self.selected else None
+        self.split.set_sidebar(self._build_sidebar())
+        self.split.set_content(self._build_content())
+        self.tray.set_items(self._tray_items())
+        self.refresh(selected)
+        return GLib.SOURCE_REMOVE
 
     def _on_multiuser_toggled(self, row, _param) -> None:
         active = row.get_active()
@@ -1274,26 +1364,31 @@ class MerciWindow(Adw.ApplicationWindow):
         if self.selected is not None:
             self._refresh_runtime_state(self.selected)
         if not active:
-            self._toast("MultiUser выключен: запуск идёт в основном профиле")
+            self._toast(tr("MultiUser выключен: запуск идёт в основном профиле"))
             return
 
         # Готовность спрашиваем у хоста, а значит в потоке.
         hostexec.in_thread(waydroid.multiuser_ready, self._on_multiuser_ready)
 
     def _on_multiuser_ready(self, result, _error) -> None:
-        ready, detail = result or (False, "не удалось спросить хост")
+        if self._closing:
+            return
+        ready, detail = result or (False, tr("не удалось спросить хост"))
         if ready:
-            self._toast("MultiUser включён")
+            self._toast(tr("MultiUser включён"))
             return
         dialog = Adw.AlertDialog(
-            heading="Контейнер к этому не готов",
-            body=f"{detail}.\n\nMerci может подготовить его: разрешит Android "
-            "нескольких пользователей, откроет себе доступ к контейнеру через "
-            "adb и поставит android-tools. Контейнер перезапустится, "
-            "потребуется пароль.",
+            heading=tr("Контейнер к этому не готов"),
+            body=tr(
+                "{detail}.\n\nMerci может подготовить его: разрешит Android "
+                "нескольких пользователей, откроет себе доступ к контейнеру через "
+                "adb и поставит android-tools. Контейнер перезапустится, "
+                "потребуется пароль.",
+                detail=detail,
+            ),
         )
-        dialog.add_response("later", "Потом")
-        dialog.add_response("prepare", "Подготовить")
+        dialog.add_response("later", tr("Потом"))
+        dialog.add_response("prepare", tr("Подготовить"))
         dialog.set_response_appearance("prepare", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -1309,12 +1404,12 @@ class MerciWindow(Adw.ApplicationWindow):
 
     def _show_crash_log(self) -> None:
         """Отчёт о падении из контейнера: почему приложение закрылось."""
-        self._toast("Читаем отчёт о падении")
+        self._toast(tr("Читаем отчёт о падении"))
         waydroid.crash_log_async(self._present_crash_log)
 
     def _present_crash_log(self, text: str) -> None:
         view = Gtk.TextView(editable=False, monospace=True)
-        view.get_buffer().set_text(text or "Записей о сбоях нет.")
+        view.get_buffer().set_text(text or tr("Записей о сбоях нет."))
         view.set_left_margin(10)
         view.set_right_margin(10)
         view.set_wrap_mode(Pango.WrapMode.WORD_CHAR if False else Gtk.WrapMode.WORD_CHAR)
@@ -1322,11 +1417,11 @@ class MerciWindow(Adw.ApplicationWindow):
         scroller.set_child(view)
         scroller.set_size_request(760, 480)
 
-        dialog = Adw.Dialog(title="Журнал сбоев Android")
+        dialog = Adw.Dialog(title=tr("Журнал сбоев Android"))
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         copy = Gtk.Button(icon_name="edit-copy-symbolic")
-        copy.set_tooltip_text("Скопировать")
+        copy.set_tooltip_text(tr("Скопировать"))
         copy.connect("clicked", lambda *_: self.get_clipboard().set(text))
         header.pack_end(copy)
         toolbar.add_top_bar(header)
@@ -1338,7 +1433,7 @@ class MerciWindow(Adw.ApplicationWindow):
         """Перезапуск контейнера: всё запущенное в нём закроется."""
         self.restart_button.set_sensitive(False)
         self.restart_row.set_sensitive(False)
-        self._toast("Перезапускаем контейнер…")
+        self._toast(tr("Перезапускаем контейнер…"))
 
         def done(error) -> None:
             self.restart_button.set_sensitive(True)
@@ -1349,9 +1444,9 @@ class MerciWindow(Adw.ApplicationWindow):
                 # зависшем состоянии сессии мало — нужен сам контейнер.
                 self._offer_container_restart(str(error))
             elif error is not None:
-                self._error("Перезапустить не вышло", str(error))
+                self._error(tr("Перезапустить не вышло"), str(error))
             else:
-                self._toast("Контейнер перезапущен")
+                self._toast(tr("Контейнер перезапущен"))
             if self.selected is not None:
                 self._refresh_runtime_state(self.selected)
 
@@ -1359,13 +1454,16 @@ class MerciWindow(Adw.ApplicationWindow):
 
     def _offer_container_restart(self, message: str) -> None:
         dialog = Adw.AlertDialog(
-            heading="Контейнер не отвечает",
-            body=f"{message}.\n\nAndroid внутри переживает перезапуск сессии, "
-            "поэтому его мало: нужен перезапуск самого контейнера. Всё "
-            "запущенное в нём закроется, потребуется пароль.",
+            heading=tr("Контейнер не отвечает"),
+            body=tr(
+                "{message}.\n\nAndroid внутри переживает перезапуск сессии, "
+                "поэтому его мало: нужен перезапуск самого контейнера. Всё "
+                "запущенное в нём закроется, потребуется пароль.",
+                message=message,
+            ),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("restart", "Перезапустить контейнер")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("restart", tr("Перезапустить контейнер"))
         dialog.set_response_appearance("restart", Adw.ResponseAppearance.SUGGESTED)
         dialog.connect(
             "response",
@@ -1377,13 +1475,13 @@ class MerciWindow(Adw.ApplicationWindow):
     def _stop_waydroid(self) -> None:
         """Выключение контейнера: все запущенные в нём приложения закроются."""
         dialog = Adw.AlertDialog(
-            heading="Выключить Waydroid?",
-            body="Контейнер остановится, и всё запущенное в нём закроется. "
+            heading=tr("Выключить Waydroid?"),
+            body=tr("Контейнер остановится, и всё запущенное в нём закроется. "
             "Следующий запуск приложения поднимет его заново — это займёт "
-            "около полуминуты.",
+            "около полуминуты."),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("stop", "Выключить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("stop", tr("Выключить"))
         dialog.set_response_appearance("stop", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("cancel")
         dialog.connect("response", self._on_stop_response)
@@ -1393,15 +1491,15 @@ class MerciWindow(Adw.ApplicationWindow):
         if response != "stop":
             return
 
-        self._toast("Выключаем контейнер…")
+        self._toast(tr("Выключаем контейнер…"))
         self.play_button.set_sensitive(False)
 
         def done(problem: str) -> None:
             waydroid.forget_state()
             if problem:
-                self._error("Не выключилось", problem)
+                self._error(tr("Не выключилось"), problem)
             else:
-                self._toast("Waydroid выключен")
+                self._toast(tr("Waydroid выключен"))
             if self.selected is not None:
                 self._refresh_runtime_state(self.selected)
 
@@ -1411,7 +1509,7 @@ class MerciWindow(Adw.ApplicationWindow):
         try:
             waydroid.show_full_ui()
         except waydroid.WaydroidError as exc:
-            self._error("Не удалось открыть окно Android", str(exc))
+            self._error(tr("Не удалось открыть окно Android"), str(exc))
 
     def _confirm_uninstall(self) -> None:
         """Снять установку в контейнере, не трогая запись в библиотеке."""
@@ -1419,18 +1517,21 @@ class MerciWindow(Adw.ApplicationWindow):
         if entry is None:
             return
         where = (
-            f"из профиля Android №{entry.profile}"
+            tr("из профиля Android №{n}", n=entry.profile)
             if entry.profile
-            else "из контейнера"
+            else tr("из контейнера")
         )
         dialog = Adw.AlertDialog(
-            heading="Удалить из контейнера?",
-            body=f"«{entry.name}» будет убрано {where} вместе со своими данными "
-            "внутри Android — учётной записью в игре, кешем, настройками.\n\n"
-            "APK останется в библиотеке, и запустить его можно будет снова.",
+            heading=tr("Удалить из контейнера?"),
+            body=tr(
+                "«{name}» будет убрано {where} вместе со своими данными "
+                "внутри Android — учётной записью в игре, кешем, настройками.\n\n"
+                "APK останется в библиотеке, и запустить его можно будет снова.",
+                name=entry.name, where=where,
+            ),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("remove", "Удалить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("remove", tr("Удалить"))
         dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("cancel")
         dialog.connect("response", self._on_uninstall_response, entry)
@@ -1443,7 +1544,7 @@ class MerciWindow(Adw.ApplicationWindow):
         self._busy = True
         self.uninstall_row.set_sensitive(False)
         self.play_button.set_sensitive(False)
-        self._toast(f"{entry.name}: убираем из контейнера…")
+        self._toast(tr("{name}: убираем из контейнера…", name=entry.name))
 
         def done(error) -> None:
             self._busy = False
@@ -1457,17 +1558,17 @@ class MerciWindow(Adw.ApplicationWindow):
                 self._ask_android_window(str(error))
                 return
             if error is not None:
-                self._error("Удалить из контейнера не вышло", str(error))
+                self._error(tr("Удалить из контейнера не вышло"), str(error))
                 return
-            self._toast(f"{entry.name} убрано из контейнера")
+            self._toast(tr("{name} убрано из контейнера", name=entry.name))
 
         waydroid.uninstall_async(entry, done)
 
     def _ask_android_window(self, message: str) -> None:
         """Просит подтвердить действие в окне контейнера и открывает его."""
-        dialog = Adw.AlertDialog(heading="Нужно подтвердить в Android", body=message)
-        dialog.add_response("close", "Понятно")
-        dialog.add_response("open", "Открыть окно Android")
+        dialog = Adw.AlertDialog(heading=tr("Нужно подтвердить в Android"), body=message)
+        dialog.add_response("close", tr("Понятно"))
+        dialog.add_response("open", tr("Открыть окно Android"))
         dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_default_response("open")
         dialog.connect(
@@ -1480,13 +1581,16 @@ class MerciWindow(Adw.ApplicationWindow):
         if entry is None:
             return
         dialog = Adw.AlertDialog(
-            heading="Удалить из библиотеки?",
-            body=f"«{entry.name}» и все его данные будут стёрты безвозвратно — "
-            "и APK здесь, и установка в контейнере вместе с её данными "
-            "внутри Android.",
+            heading=tr("Удалить из библиотеки?"),
+            body=tr(
+                "«{name}» и все его данные будут стёрты безвозвратно — "
+                "и APK здесь, и установка в контейнере вместе с её данными "
+                "внутри Android.",
+                name=entry.name,
+            ),
         )
-        dialog.add_response("cancel", "Отмена")
-        dialog.add_response("remove", "Удалить")
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("remove", tr("Удалить"))
         dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("cancel")
         dialog.connect("response", self._on_remove_response, entry)
@@ -1498,11 +1602,11 @@ class MerciWindow(Adw.ApplicationWindow):
         try:
             self.library.remove(entry)
         except ValueError as exc:
-            self._error("Удаление отменено", str(exc))
+            self._error(tr("Удаление отменено"), str(exc))
             return
         self.selected = None
         self.refresh()
-        self._toast(f"{entry.name} удалено")
+        self._toast(tr("{name} удалено", name=entry.name))
 
         # Из контейнера убираем следом и молча: запись из библиотеки уже
         # исчезла, и держать пользователя ради ответа контейнера незачем.
@@ -1521,9 +1625,13 @@ class MerciWindow(Adw.ApplicationWindow):
     # -- мелочи ------------------------------------------------------------
 
     def _toast(self, message: str) -> None:
+        if self._closing:
+            return
         self.toasts.add_toast(Adw.Toast(title=message, timeout=4))
 
     def _error(self, heading: str, body: str) -> None:
+        if self._closing:
+            return
         dialog = Adw.AlertDialog(heading=heading, body=body)
-        dialog.add_response("ok", "Понятно")
+        dialog.add_response("ok", tr("Понятно"))
         dialog.present(self)

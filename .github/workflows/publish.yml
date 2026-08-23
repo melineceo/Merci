@@ -65,7 +65,7 @@ jobs:
 
           \`\`\`bash
           flatpak remote-add --user --if-not-exists merci \\
-            https://repo.hackerstone.xyz/merci.flatpakrepo
+            https://${{ github.repository_owner }}.github.io/Merci/merci.flatpakrepo
           flatpak install --user merci xyz.hackerstone.Merci
           \`\`\`
 

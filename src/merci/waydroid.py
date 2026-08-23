@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from gi.repository import Gio, GLib
 
 from .hostexec import Cache, host_argv, in_thread, run as _run, succeeds as _ok
+from .i18n import tr
 from .library import Entry
 
 
@@ -52,23 +53,23 @@ def status(use_cache: bool = True) -> tuple[bool, str]:
 
 def _probe() -> tuple[bool, str]:
     if not _ok(["sh", "-c", "command -v waydroid"]):
-        return False, "не установлен"
+        return False, tr("не установлен")
     result = _run(["waydroid", "status"])
     if result.returncode != 0:
         lines = (result.stderr or result.stdout).strip().splitlines()
-        return False, lines[-1] if lines else "недоступен"
+        return False, lines[-1] if lines else tr("недоступен")
 
     # waydroid отвечает по-разному в зависимости от версии и подкоманды:
     # "Session:\tRUNNING", "UNINITIALIZED" либо фразой
     # 'Waydroid is not initialized, run "waydroid init"'.
     output = result.stdout.upper()
     if "NOT INITIALIZED" in output or "UNINITIALIZED" in output:
-        return False, "образ Android не загружен"
+        return False, tr("образ Android не загружен")
     if "RUNNING" in output:
-        return True, "сессия запущена"
+        return True, tr("сессия запущена")
     if "STOPPED" in output:
-        return False, "сессия остановлена"
-    return False, "состояние неясно"
+        return False, tr("сессия остановлена")
+    return False, tr("состояние неясно")
 
 
 def _prop(name: str) -> str:
@@ -206,19 +207,19 @@ def install_and_launch_async(
     def work():
         if multiuser and entry.profile:
             ensure_session(stage)
-            stage("Готовим профиль Android…")
+            stage(tr("Готовим профиль Android…"))
             user = ensure_android_user(entry)
             check_build()
             if entry.package not in packages_for_user(user):
-                stage("Устанавливаем в профиль…")
+                stage(tr("Устанавливаем в профиль…"))
                 install_for_user(entry, user)
-            stage("Переключаем профиль…")
+            stage(tr("Переключаем профиль…"))
             switch_android_user(user)
             # Роль браузера у каждого профиля своя: без этого ссылки из игры
             # открывались внутренним браузером Android, а не на хосте.
             if URLFORWARD_PACKAGE in packages_for_user(0):
                 set_browser_role(user)
-            stage("Открываем…")
+            stage(tr("Открываем…"))
             launch_for_user(entry, user)
             return True
 
@@ -230,17 +231,17 @@ def install_and_launch_async(
         if adb_available():
             try:
                 if current_android_user() > 0:
-                    stage("Возвращаемся в основной профиль…")
+                    stage(tr("Возвращаемся в основной профиль…"))
                     switch_android_user(0)
             except WaydroidError:
                 pass
 
         check_build()
         if entry.package not in installed_packages():
-            stage("Устанавливаем в контейнер…")
+            stage(tr("Устанавливаем в контейнер…"))
             install_apk(entry)
             _installed_cache.clear()
-        stage("Открываем…")
+        stage(tr("Открываем…"))
         launch_apk(entry)
         return True
 
@@ -273,7 +274,7 @@ def replace_install_async(entry: Entry, callback, on_stage=None, multiuser: bool
             GLib.idle_add(lambda: (on_stage(text), False)[1])
 
     def work():
-        stage("Убираем прежнюю сборку…")
+        stage(tr("Убираем прежнюю сборку…"))
         uninstall_everywhere(entry.package)
         return True
 
@@ -526,7 +527,7 @@ def urlforward_step() -> Step:
     elif not os.path.exists(os.path.join(workdir, "build-apk.sh")):
         # Вне флатпака /app нет; тогда рассчитываем на то, что исходники уже
         # лежат в данных с прошлого раза.
-        raise WaydroidError("исходники перехватчика не найдены")
+        raise WaydroidError(tr("исходники перехватчика не найдены"))
 
     script = (
         "set -e; "
@@ -1613,7 +1614,7 @@ def installed_packages() -> set[str]:
 
 def install_apk(entry: Entry) -> None:
     if not os.path.exists(entry.apk_path):
-        raise WaydroidError("файл APK пропал из библиотеки")
+        raise WaydroidError(tr("файл APK пропал из библиотеки"))
     result = _run(["waydroid", "app", "install", entry.apk_path], timeout=300)
     text = (result.stdout + result.stderr).strip()
     # Служба Waydroid и здесь умеет отказать, выйдя с нулевым кодом.
@@ -1664,7 +1665,7 @@ def uninstall_apk(package: str) -> None:
       «удалить приложение?» в окне контейнера, и нажать надо там.
     """
     if not package:
-        raise WaydroidError("неизвестно имя пакета")
+        raise WaydroidError(tr("неизвестно имя пакета"))
 
     if adb_available():
         try:
@@ -1689,8 +1690,8 @@ def uninstall_apk(package: str) -> None:
     if intent.returncode != 0:
         raise WaydroidError(text or "удалить не удалось")
     raise NeedsConfirmation(
-        "контейнер не дал убрать приложение сам, поэтому Android спросит "
-        "об этом в своём окне — подтвердите удаление там"
+        tr("контейнер не дал убрать приложение сам, поэтому Android спросит "
+        "об этом в своём окне — подтвердите удаление там")
     )
 
 
@@ -1741,7 +1742,7 @@ def ensure_session(stage=None) -> None:
     """
     if not session_running():
         if stage is not None:
-            stage("Поднимаем контейнер…")
+            stage(tr("Поднимаем контейнер…"))
         _run(["sh", "-c", "setsid waydroid session start >/dev/null 2>&1 &"], timeout=30)
         for _ in range(60):
             time.sleep(2)
@@ -1749,7 +1750,7 @@ def ensure_session(stage=None) -> None:
                 forget_state()
                 break
         else:
-            raise WaydroidError("контейнер не поднялся")
+            raise WaydroidError(tr("контейнер не поднялся"))
 
     # Android внутри поднимается ещё некоторое время после сессии, и adb до
     # этого момента отвечает отказом.
@@ -1796,7 +1797,7 @@ def restart_session(stage=None) -> None:
     контейнер иногда просыпается после перезагрузки машины.
     """
     if stage is not None:
-        stage("Перезапускаем контейнер…")
+        stage(tr("Перезапускаем контейнер…"))
     _run(["waydroid", "session", "stop"], timeout=60)
     _run(["sh", "-c", "pkill -9 -f 'waydroid session start' || true"], timeout=15)
 
@@ -1809,7 +1810,7 @@ def restart_session(stage=None) -> None:
             break
         time.sleep(2)
     else:
-        raise WaydroidError("сессия не остановилась")
+        raise WaydroidError(tr("сессия не остановилась"))
 
     time.sleep(3)
     _run(["sh", "-c", "setsid waydroid session start >/dev/null 2>&1 &"], timeout=30)
@@ -1819,9 +1820,9 @@ def restart_session(stage=None) -> None:
         if session_running():
             break
     if stage is not None:
-        stage("Ждём сеть контейнера…")
+        stage(tr("Ждём сеть контейнера…"))
     if not wait_for_ip(120):
-        raise ContainerUnreachable("контейнер не получил адрес в сети")
+        raise ContainerUnreachable(tr("контейнер не получил адрес в сети"))
 
     # Адреса мало: waydroid показывает последний известный, даже когда
     # внутри всё легло. Проверяем, что контейнер отвечает на самом деле.
@@ -1847,7 +1848,7 @@ def adb_available() -> bool:
 def _adb(args: list[str], timeout: int = 120):
     ip = container_ip()
     if not ip:
-        raise WaydroidError("контейнер не запущен")
+        raise WaydroidError(tr("контейнер не запущен"))
     return _run(["adb", "-s", f"{ip}:{_ADB_PORT}", *args], timeout=timeout)
 
 
@@ -1870,7 +1871,7 @@ def adb_connect() -> None:
     """
     ip = container_ip()
     if not ip:
-        raise WaydroidError("контейнер не запущен")
+        raise WaydroidError(tr("контейнер не запущен"))
 
     target = f"{ip}:{_ADB_PORT}"
     text = ""
@@ -1889,8 +1890,8 @@ def adb_connect() -> None:
             return
         if "unauthorized" in text:
             raise WaydroidError(
-                "контейнер просит разрешить отладку: откройте окно Android и "
-                "нажмите «Разрешить» в появившемся вопросе"
+                tr("контейнер просит разрешить отладку: откройте окно Android и "
+                "нажмите «Разрешить» в появившемся вопросе")
             )
     raise WaydroidError(text or "adb не подключился к контейнеру")
 
@@ -1915,8 +1916,8 @@ def create_android_user(name: str) -> int:
         text = (result.stdout + result.stderr).strip()
         if "max" in text.lower() or "limit" in text.lower():
             raise WaydroidError(
-                "Android не даёт завести ещё одного пользователя — "
-                "предел уже достигнут"
+                tr("Android не даёт завести ещё одного пользователя — "
+                "предел уже достигнут")
             )
         raise WaydroidError(text or "не удалось завести пользователя Android")
     number = int(match.group(1))
@@ -2075,7 +2076,7 @@ def installed_version(package: str) -> str:
 
 def install_for_user(entry: Entry, user: int) -> None:
     if not os.path.exists(entry.apk_path):
-        raise WaydroidError("файл APK пропал из библиотеки")
+        raise WaydroidError(tr("файл APK пропал из библиотеки"))
     result = _adb(
         ["install", "-r", "--user", str(user), entry.apk_path], timeout=600
     )
@@ -2113,7 +2114,7 @@ def switch_android_user(user: int) -> None:
         time.sleep(1)
         if current_android_user() == user:
             return
-    raise WaydroidError("контейнер не переключился на этого пользователя")
+    raise WaydroidError(tr("контейнер не переключился на этого пользователя"))
 
 
 def launch_for_user(entry: Entry, user: int) -> None:
@@ -2132,7 +2133,7 @@ def launch_for_user(entry: Entry, user: int) -> None:
     режим отображения без строки состояния Android.
     """
     if not entry.activity:
-        raise WaydroidError("в APK не нашлось activity для запуска")
+        raise WaydroidError(tr("в APK не нашлось activity для запуска"))
 
     # Свойство ставим через waydroid: оно системное, и из adb-оболочки его
     # менять не разрешено — служба контейнера делает это от имени system.
@@ -2164,7 +2165,7 @@ def launch_apk(entry: Entry) -> None:
     приложения уже появлялось на экране.
     """
     if not entry.package:
-        raise WaydroidError("неизвестно имя пакета")
+        raise WaydroidError(tr("неизвестно имя пакета"))
 
     last = ""
     for attempt in range(4):
@@ -2441,8 +2442,8 @@ def renderer() -> tuple[str, bool]:
     # неправда, если видеокарта как раз занята контейнером, — смотрим, жив ли
     # сервер Venus: на пути waydroid-nvidia именно он держит карту.
     if _run(["pgrep", "-f", "virgl_render_server"]).returncode == 0:
-        return "аппаратный (через Venus)", True
-    return "определить не удалось — контейнер не отвечает", True
+        return tr("аппаратный (через Venus)"), True
+    return tr("определить не удалось — контейнер не отвечает"), True
 
 
 def current_bridge() -> str:
@@ -2466,9 +2467,9 @@ def nvidia_ready() -> tuple[bool, str]:
         ["sh", "-c", "cat /proc/driver/nvidia/version 2>/dev/null"]
     ).stdout
     if not version:
-        return False, "драйвер NVIDIA не найден"
+        return False, tr("драйвер NVIDIA не найден")
     if "Open Kernel Module" not in version:
-        return False, "нужны открытые модули ядра (nvidia-open), у вас закрытые"
+        return False, tr("нужны открытые модули ядра (nvidia-open), у вас закрытые")
 
     number = re.search(r"\s(\d+)\.(\d+)", version)
     if number and int(number.group(1)) < 595:
@@ -2612,10 +2613,10 @@ def container_restart_step() -> Step:
 def multiuser_ready() -> tuple[bool, str]:
     """Готов ли контейнер держать несколько пользователей Android."""
     if not adb_available():
-        return False, "на хосте нет adb (пакет android-tools)"
+        return False, tr("на хосте нет adb (пакет android-tools)")
     if _prop("fw.max_users") in ("", "0", "1"):
-        return False, "в контейнере не разрешено больше одного пользователя"
-    return True, "готово"
+        return False, tr("в контейнере не разрешено больше одного пользователя")
+    return True, tr("готово")
 
 
 def multiuser_step() -> Step:

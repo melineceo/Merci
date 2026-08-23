@@ -38,6 +38,22 @@ class Settings:
         os.replace(tmp, self.path)
 
     @property
+    def language(self) -> str:
+        """Язык интерфейса: 'ru' или 'en'.
+
+        Пока не выбран — берём язык системы: русскому пользователю Merci
+        откроется по-русски без настройки, остальным по-английски.
+        """
+        from .i18n import LANGUAGES, system_language
+
+        value = self.get("language", "")
+        return value if value in LANGUAGES else system_language()
+
+    @language.setter
+    def language(self, value: str) -> None:
+        self.set("language", value)
+
+    @property
     def minimize_on_launch(self) -> bool:
         """Прятать окно Merci, когда приложение ушло в Waydroid.
 

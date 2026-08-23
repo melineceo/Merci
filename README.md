@@ -4,6 +4,8 @@
 
 # Merci
 
+**Русский** · [English](README.en.md)
+
 **Android-приложения в Linux — перетащил APK и запустил.**
 
 [![версия](https://img.shields.io/badge/версия-0.1.0-7c5cff)](https://github.com/melineceo/Merci/releases)
@@ -68,7 +70,7 @@ flowchart LR
 flatpak remote-add --user --if-not-exists flathub \
   https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak remote-add --user --if-not-exists merci \
-  https://repo.hackerstone.xyz/merci.flatpakrepo
+  https://melineceo.github.io/Merci/merci.flatpakrepo
 flatpak install --user merci xyz.hackerstone.Merci
 ```
 
@@ -122,6 +124,8 @@ flatpak install --user ./Merci.flatpak
   второй аккаунт без выхода из первого.
 - **Значок в трее** с меню контейнера, и окно само уходит в трей, когда игра
   запустилась.
+- **Два языка интерфейса** — русский и английский. Выбор в настройках
+  сохраняется, окно перерисовывается сразу; по умолчанию берётся язык системы.
 - **Никакого доступа к `$HOME`**: APK попадает внутрь только через портал
   выбора файлов или перетаскивание, по одному файлу за раз.
 
@@ -729,6 +733,8 @@ scripts/merci-launcher       точка входа внутри флатпака
 src/merci/apk.py             разбор APK и бинарного AXML
 src/merci/library.py         библиотека и метаданные
 src/merci/settings.py        настройки (файл settings.json)
+src/merci/i18n.py            язык интерфейса
+src/merci/lang_en.py         английский словарь
 src/merci/tray.py            значок в трее: StatusNotifierItem и меню
 src/merci/hostexec.py        вызовы хоста в потоке и кеш состояния
 src/merci/waydroid.py        состояние Waydroid, план установки, трансляторы,

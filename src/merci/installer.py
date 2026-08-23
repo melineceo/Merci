@@ -18,6 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from . import waydroid  # noqa: E402
+from .i18n import tr
 
 _LOG_LIMIT = 400  # строк; больше в мини-логе всё равно не прочитать
 
@@ -25,8 +26,8 @@ _LOG_LIMIT = 400  # строк; больше в мини-логе всё рав�
 def _duration(seconds: float) -> str:
     seconds = int(seconds)
     if seconds < 60:
-        return f"{seconds} с"
-    return f"{seconds // 60} мин {seconds % 60:02d} с"
+        return tr("{n} с", n=seconds)
+    return tr("{m} мин {s} с", m=seconds // 60, s=f"{seconds % 60:02d}")
 
 
 class StepRow(Adw.ActionRow):
@@ -57,7 +58,7 @@ class StepRow(Adw.ActionRow):
         self.add_prefix(box)
 
         if step.downloads:
-            self.set_subtitle(f"{step.hint} · скачает {step.downloads}")
+            self.set_subtitle(tr("{hint} · скачает {what}", hint=tr(step.hint), what=step.downloads))
 
     def set_state(self, state: str) -> None:
         running = state == "run"
@@ -82,7 +83,7 @@ class InstallerDialog(Adw.Dialog):
         on_finished=None,
         monitor: tuple[int, int] = (0, 0),
     ) -> None:
-        super().__init__(title="Подготовка Waydroid", content_width=640, content_height=680)
+        super().__init__(title=tr("Подготовка Waydroid"), content_width=640, content_height=680)
         self._parent = parent
         self._needs_bridge = needs_bridge
         # Размер монитора нужен, чтобы посчитать разрешение рендера: узнать
@@ -106,7 +107,7 @@ class InstallerDialog(Adw.Dialog):
     # -- интерфейс -------------------------------------------------------
 
     def _build(self) -> None:
-        self.phase_label = Gtk.Label(label="Проверяем, что уже готово", xalign=0.5)
+        self.phase_label = Gtk.Label(label=tr("Проверяем, что уже готово"), xalign=0.5)
         self.phase_label.add_css_class("title-2")
         self.phase_label.set_wrap(True)
         self.phase_label.set_justify(Gtk.Justification.CENTER)
@@ -146,7 +147,7 @@ class InstallerDialog(Adw.Dialog):
         progress_box.append(self.progress)
         progress_box.append(meta)
 
-        self.group = Adw.PreferencesGroup(title="Шаги")
+        self.group = Adw.PreferencesGroup(title=tr("Шаги"))
 
         self.log_view = Gtk.TextView(editable=False, monospace=True, cursor_visible=False)
         self.log_view.add_css_class("merci-log")
@@ -160,18 +161,18 @@ class InstallerDialog(Adw.Dialog):
         self.log_scroll.set_size_request(-1, 170)
 
         self.log_expander = Adw.ExpanderRow(
-            title="Журнал", subtitle="Полный вывод команд на хосте"
+            title=tr("Журнал"), subtitle=tr("Полный вывод команд на хосте")
         )
         self.log_expander.add_row(Adw.ActionRow(child=self.log_scroll))
         log_group = Adw.PreferencesGroup()
         log_group.add(self.log_expander)
 
-        self.primary = Gtk.Button(label="Установить")
+        self.primary = Gtk.Button(label=tr("Установить"))
         self.primary.add_css_class("suggested-action")
         self.primary.add_css_class("pill")
         self.primary.connect("clicked", self._on_primary)
 
-        self.secondary = Gtk.Button(label="Отмена")
+        self.secondary = Gtk.Button(label=tr("Отмена"))
         self.secondary.add_css_class("pill")
         self.secondary.set_visible(False)
         self.secondary.connect("clicked", self._on_secondary)
@@ -197,7 +198,7 @@ class InstallerDialog(Adw.Dialog):
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         self.recheck = Gtk.Button(icon_name="view-refresh-symbolic")
-        self.recheck.set_tooltip_text("Проверить заново")
+        self.recheck.set_tooltip_text(tr("Проверить заново"))
         self.recheck.connect("clicked", lambda *_: self._reload_plan())
         header.pack_end(self.recheck)
         toolbar.add_top_bar(header)
@@ -211,8 +212,8 @@ class InstallerDialog(Adw.Dialog):
             self.group.remove(row)
         self._rows.clear()
 
-        self.phase_label.set_text("Проверяем, что уже готово")
-        self.detail_label.set_text("Опрашиваем хост")
+        self.phase_label.set_text(tr("Проверяем, что уже готово"))
+        self.detail_label.set_text(tr("Опрашиваем хост"))
         self.percent_label.set_text("")
         self.primary.set_sensitive(False)
         self._pulse(True)
@@ -227,15 +228,16 @@ class InstallerDialog(Adw.Dialog):
         self.primary.set_sensitive(True)
 
         if not self._steps:
-            self._show_success("Waydroid готов", "Можно запускать приложения")
+            self._show_success(tr("Waydroid готов"), tr("Можно запускать приложения"))
             return
 
         minutes = sum(step.minutes for step in self._steps)
         self.percent_label.set_text("")
-        self.phase_label.set_text("Готовы установить")
+        self.phase_label.set_text(tr("Готовы установить"))
         self.detail_label.set_text(
-            f"{len(self._steps)} шаг(ов), примерно {minutes} мин. "
-            "Шаги с правами root подтверждаются паролем — Merci его не видит."
+            tr("{count} шаг(ов), примерно {minutes} мин. "
+               "Шаги с правами root подтверждаются паролем — Merci его не видит.",
+               count=len(self._steps), minutes=minutes)
         )
         self.progress.set_fraction(0.0)
         self.step_label.set_text("")
@@ -268,11 +270,11 @@ class InstallerDialog(Adw.Dialog):
         if self._running:
             if self._runner is not None:
                 self._runner.cancel()
-            self._append_log("отменено пользователем")
+            self._append_log(tr("отменено пользователем"))
             self._stop_running()
-            self.phase_label.set_text("Установка отменена")
-            self.detail_label.set_text("Незавершённый шаг можно повторить")
-            self.primary.set_label("Повторить")
+            self.phase_label.set_text(tr("Установка отменена"))
+            self.detail_label.set_text(tr("Незавершённый шаг можно повторить"))
+            self.primary.set_label(tr("Повторить"))
             self.primary.set_visible(True)
             self.secondary.set_visible(False)
             self.recheck.set_sensitive(True)
@@ -290,7 +292,7 @@ class InstallerDialog(Adw.Dialog):
         row.set_state("run")
         self._step_started_at = time.monotonic()
 
-        self.step_label.set_text(f"Шаг {self._index + 1} из {len(self._steps)}")
+        self.step_label.set_text(tr("Шаг {n} из {total}", n=self._index + 1, total=len(self._steps)))
         self.phase_label.set_text(step.title)
         self.detail_label.set_text(step.hint)
         self.percent_label.set_text("")
@@ -334,7 +336,9 @@ class InstallerDialog(Adw.Dialog):
     def _tick(self) -> bool:
         if not self._running:
             return False
-        self.elapsed_label.set_text(f"прошло {_duration(time.monotonic() - self._started_at)}")
+        self.elapsed_label.set_text(
+            tr("прошло {time}", time=_duration(time.monotonic() - self._started_at))
+        )
         return True
 
     def _pulse(self, active: bool) -> None:
@@ -362,22 +366,22 @@ class InstallerDialog(Adw.Dialog):
 
     _HINTS = {
         "bridge": (
-            "Не удалось поставить трансляцию ARM64",
-            "Архив транслятора качается с GitHub, и соединение оборвалось "
+            tr("Не удалось поставить трансляцию ARM64"),
+            tr("Архив транслятора качается с GitHub, и соединение оборвалось "
             "(в журнале — SSL: RECORD_LAYER_FAILURE или таймаут). Merci уже "
             "делает три попытки и пробует запасной libhoudini.\n\n"
             "Обычно помогает другая локация VPN: канал должен держать "
             "непрерывную передачу в несколько сотен мегабайт. "
-            "Всё остальное уже установлено, повторить можно только этот шаг.",
+            "Всё остальное уже установлено, повторить можно только этот шаг."),
         ),
         "network": (
-            "Сервер образов Waydroid не отвечает",
-            "ota.waydro.id раздаётся через GitHub Pages, и у вас он недоступен. "
+            tr("Сервер образов Waydroid не отвечает"),
+            tr("ota.waydro.id раздаётся через GitHub Pages, и у вас он недоступен. "
             "Сам waydroid init начинает именно с этого адреса и в такой ситуации "
             "висит бесконечно и молча — поэтому Merci проверяет связь заранее.\n\n"
             "Что можно сделать: включить VPN и повторить, либо прописать своё "
             "зеркало в файл ota.conf в данных Merci — первая строка system, "
-            "вторая vendor.",
+            "вторая vendor."),
         ),
     }
 
@@ -389,18 +393,18 @@ class InstallerDialog(Adw.Dialog):
         title, detail = self._HINTS.get(
             step.key,
             (
-                f"Шаг «{step.title}» не выполнился",
-                "Подробности в журнале. Ту же команду можно выполнить вручную — "
-                "кнопка скопирует её в буфер обмена.",
+                tr("Шаг «{title}» не выполнился", title=tr(step.title)),
+                tr("Подробности в журнале. Ту же команду можно выполнить вручную — "
+                "кнопка скопирует её в буфер обмена."),
             ),
         )
         self.phase_label.set_text(title)
         self.detail_label.set_text(detail)
         self.log_expander.set_expanded(step.key not in self._HINTS)
-        self.primary.set_label("Скопировать команду")
+        self.primary.set_label(tr("Скопировать команду"))
         self.primary.remove_css_class("suggested-action")
         self.primary.set_visible(True)
-        self.secondary.set_label("Закрыть")
+        self.secondary.set_label(tr("Закрыть"))
         self.secondary.set_visible(True)
         self._command_to_copy = step.command_line()
         self.primary.disconnect_by_func(self._on_primary)
@@ -408,8 +412,8 @@ class InstallerDialog(Adw.Dialog):
 
     def _on_copy(self, *_args) -> None:
         self.get_clipboard().set(self._command_to_copy)
-        self._append_log("команда скопирована в буфер обмена")
-        self.detail_label.set_text("Команда в буфере обмена")
+        self._append_log(tr("команда скопирована в буфер обмена"))
+        self.detail_label.set_text(tr("Команда в буфере обмена"))
 
     def _all_done(self) -> None:
         self._stop_running()
@@ -417,14 +421,14 @@ class InstallerDialog(Adw.Dialog):
         ready, detail = waydroid.status(use_cache=False)
         if ready:
             self._show_success(
-                "Waydroid готов",
-                f"Заняло {_duration(time.monotonic() - self._started_at)}",
+                tr("Waydroid готов"),
+                tr("Заняло {time}", time=_duration(time.monotonic() - self._started_at)),
             )
         else:
-            self.phase_label.set_text("Почти готово")
+            self.phase_label.set_text(tr("Почти готово"))
             self.detail_label.set_text(detail)
             self.percent_label.set_text("")
-            self.primary.set_label("Проверить снова")
+            self.primary.set_label(tr("Проверить снова"))
             self.primary.set_visible(True)
             self.secondary.set_visible(False)
         self.set_can_close(True)
@@ -440,7 +444,7 @@ class InstallerDialog(Adw.Dialog):
         self.phase_label.set_text(title)
         self.detail_label.set_text(detail)
         self.step_label.set_text("")
-        self.primary.set_label("Закрыть")
+        self.primary.set_label(tr("Закрыть"))
         self.primary.set_visible(True)
         self.primary.set_sensitive(True)
         self.secondary.set_visible(False)

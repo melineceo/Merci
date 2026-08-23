@@ -197,6 +197,26 @@ class TrayIcon:
             return
         self.registered = True
 
+    def set_items(self, items: list[MenuItem]) -> None:
+        """Заменяет пункты меню — например, когда сменили язык.
+
+        Панель держит разметку меню у себя, поэтому мало подменить список:
+        нужно поднять номер ревизии и сказать ей об этом сигналом, иначе
+        она будет показывать прежние надписи до перезапуска.
+        """
+        self.items = items
+        self._revision += 1
+        if self._connection is None:
+            return
+        try:
+            self._connection.emit_signal(
+                None, MENU_PATH, "com.canonical.dbusmenu", "LayoutUpdated",
+                GLib.Variant("(ui)", (self._revision, 0)),
+            )
+        except GLib.Error:
+            # Панель могла отвалиться — значок переживёт и это.
+            pass
+
     def stop(self) -> None:
         if self._connection is None:
             return

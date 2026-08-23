@@ -13,6 +13,8 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
 
 from .library import data_root  # noqa: E402
+from .i18n import set_language, tr  # noqa: E402
+from .settings import Settings  # noqa: E402
 from .window import MerciWindow  # noqa: E402
 
 APP_ID = "xyz.hackerstone.Merci"
@@ -108,12 +110,12 @@ class MerciApplication(Adw.Application):
             developer_name="hackerstone",
             license_type=Gtk.License.MIT_X11,
             comments=(
-                "Библиотека APK с запуском через Waydroid: перетащите файл — "
+                tr("Библиотека APK с запуском через Waydroid: перетащите файл — "
                 "Merci разберёт манифест, подготовит контейнер и отдаст "
-                "приложение ему."
+                "приложение ему.")
             ),
         )
-        about.add_credit_section("Работает поверх", ["Waydroid", "waydroid_script"])
+        about.add_credit_section(tr("Работает поверх"), ["Waydroid", "waydroid_script"])
         about.present(self.window)
 
     def _on_open_library(self, *_args) -> None:
@@ -124,6 +126,8 @@ class MerciApplication(Adw.Application):
 
 def main() -> int:
     os.makedirs(data_root(), exist_ok=True)
+    # Язык выбираем до постройки окон: текст виджетам задаётся один раз.
+    set_language(Settings().language)
     return MerciApplication().run(sys.argv)
 
 

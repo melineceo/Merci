@@ -18,12 +18,14 @@ cd "$(dirname "$0")/.."
 
 OWNER="${MERCI_OWNER:-melineceo}"
 
-# Раздача живёт на своём домене, а не на github.io: адрес короче, и если
-# однажды придётся уехать с GitHub, у пользователей ничего не сломается —
-# поменяется только запись DNS. Сам файл CNAME обязателен: по нему Pages и
-# узнаёт, какой домен обслуживать.
-DOMAIN="${MERCI_DOMAIN:-repo.hackerstone.xyz}"
-PAGES="https://${DOMAIN}"
+# Раздача идёт с GitHub Pages и только оттуда: у приложения один источник
+# обновлений, и он тот же, где лежат исходники и релизы. Свой домен тут
+# пробовался и был откачен — пока DNS указывает не на GitHub, файл CNAME
+# уводит и сам github.io в никуда, и раздача перестаёт работать с обоих
+# адресов сразу. Захочется вернуть — сначала запись DNS, потом MERCI_DOMAIN.
+DOMAIN="${MERCI_DOMAIN:-}"
+PAGES="https://${OWNER}.github.io/Merci"
+[ -n "$DOMAIN" ] && PAGES="https://${DOMAIN}"
 APP_ID="xyz.hackerstone.Merci"
 MANIFEST="${APP_ID}.yaml"
 DIST="dist"
@@ -90,9 +92,13 @@ sed -e "s|__OWNER__|$OWNER|g" -e "s|__VERSION__|$VERSION|g" \
 # а ostree-репозиторий без них нерабочий.
 touch "$DIST/.nojekyll"
 
-# Домен для GitHub Pages. Лежит в самой ветке раздачи, поэтому переживает
-# любую переустановку настроек репозитория.
-echo "$DOMAIN" > "$DIST/CNAME"
+# Файл CNAME пишем, только если домен задан явно: пустой или лишний CNAME
+# заставляет Pages редиректить github.io на несуществующий адрес.
+if [ -n "$DOMAIN" ]; then
+  echo "$DOMAIN" > "$DIST/CNAME"
+else
+  rm -f "$DIST/CNAME"
+fi
 
 cat <<INFO
 
