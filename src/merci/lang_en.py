@@ -20,7 +20,6 @@ TABLE: dict[str, str] = {
         "Merci parses the manifest, prepares the container and hands the app "
         "over to it.",
 
-    "{value} ГБ": "{value} GB",
     "Б": "B",
     "КБ": "KB",
     "МБ": "MB",
@@ -170,6 +169,8 @@ TABLE: dict[str, str] = {
     "контейнер работает — остановить его и все приложения в нём":
         "the container is running — stop it and everything inside",
     "контейнер не запущен": "the container is not running",
+    "контейнер ещё поднимается — сеть внутри не готова":
+        "the container is still coming up — its network is not ready yet",
     "не настроена — arm64-APK Waydroid не примет":
         "not configured — Waydroid will not accept arm64 APKs",
     "Выберите APK": "Choose an APK",
@@ -527,6 +528,141 @@ TABLE: dict[str, str] = {
     "выключает подповерхности: из-за них кадр обновляется только на ввод":
         "turns subsurfaces off: they make the frame refresh only on input",
     "Подгонка под экран": "Fit to the screen",
+    # Копии приложений: профиль-клон Android и многооконный режим.
+    "Копия приложения": "App copy",
+    # Окна — отдельные контейнеры Android, по одному на окно.
+    "Окна": "Windows",
+    "Поднимаем основное окно…": "Bringing the main window up…",
+    "Android внутри не отвечает — помогает полный перезапуск контейнера":
+        "Android inside is not answering — a full container restart helps",
+    "Размер окон": "Window size",
+    "Android не поднялся — перезапускаем контейнер целиком…":
+        "Android did not come up — restarting the whole container…",
+    "Размер всех окон (напр. 1600x900)": "Size of every window (e.g. 1600x900)",
+    "Возвращаем выбранный размер окон…": "Restoring the chosen window size…",
+    "Приводим размер основного окна к общему…":
+        "Bringing the main window size in line with the shared one…",
+    "Поднимаем окна заново…": "Bringing the windows back up…",
+    "Укажите размер, например 1600x900": "Enter a size, for example 1600x900",
+    "Перезапускаем окно {number}…": "Restarting window {number}…",
+    "Размер применится ко всем окнам сразу — и к тем, что появятся позже. Контейнеры для этого перезапускаются, по сорок секунд на каждый работающий.":
+        "The size applies to every window at once — including the ones created later. "
+        "The containers restart for that, about forty seconds per running one.",
+    "Записываем размер для всех окон…": "Writing the size for every window…",
+    "Перезапускаем основное окно…": "Restarting the main window…",
+    "Не удалось применить размер": "Could not apply the size",
+    "Все окна теперь {width}×{height}": "Every window is now {width}×{height}",
+    "Выбрать размер окна": "Choose the window size",
+    "Размер окна {number}": "Size of window {number}",
+    "Окно примет выбранный размер после перезапуска этого контейнера — около сорока секунд. Другие окна не затрагиваются.":
+        "The window takes the chosen size after this container restarts — about forty "
+        "seconds. Other windows are not affected.",
+    "Под текущее окно": "Match the current window",
+    "Подогнать приложение под размер окна": "Fit the app to the window size",
+    "Не удалось подогнать под окно": "Could not fit to the window",
+    "Подогнано под {width}×{height}": "Fitted to {width}×{height}",
+    "окно этого приложения на экране не найдено":
+        "no window of this app was found on screen",
+    "окно слишком мало для подгонки": "the window is too small to fit into",
+    "Гасим дополнительные окна перед стартом…":
+        "Stopping the extra windows before the start…",
+    "Возвращаем оверлей с транслятором…": "Restoring the overlay with the translator…",
+    "Вернуть транслятор ARM64": "Restore the ARM64 translator",
+    "Waydroid отключил оверлей, а в нём libhoudini — контейнер перезапустится":
+        "Waydroid turned the overlay off, and libhoudini lives there — the container "
+        "will restart",
+    "переключиться не удалось": "the switch did not work",
+    "+ Окно": "+ Window",
+    "Окно {number} — основное": "Window {number} — main",
+    "Окно {number}": "Window {number}",
+    "остановлено": "stopped",
+    "работает · приложения здесь ещё нет": "running · the app is not here yet",
+    "работает · {ip}": "running · {ip}",
+    "Открыть приложение в этом окне": "Open the app in this window",
+    "Закрыть приложение в этом окне": "Close the app in this window",
+    "Удалить окно вместе с его данными": "Delete the window along with its data",
+    "Не удалось прочитать список окон": "Could not read the list of windows",
+    "Создаём окно {number}…": "Creating window {number}…",
+    "Запускаем Android в окне {number}…": "Starting Android in window {number}…",
+    "Запускаем окно {number}…": "Starting window {number}…",
+    "Ждём загрузки Android…": "Waiting for Android to boot…",
+    "Ставим приложение в окно {number}…": "Installing the app into window {number}…",
+    "Открываем окно {number}…": "Opening window {number}…",
+    "Удаляем окно {number}…": "Deleting window {number}…",
+    "Окно {number} готово": "Window {number} is ready",
+    "Открыто окно {number}": "Window {number} is open",
+    "Окно {number} удалено": "Window {number} is deleted",
+    "Открыто окон: {count}": "Windows opened: {count}",
+    "Открыто окон: {count}, с ошибками: {bad}": "Windows opened: {count}, with errors: {bad}",
+    "Приложение закрыто во всех окнах": "The app is closed in every window",
+    "Не удалось создать окно": "Could not create the window",
+    "Окно не открылось": "The window did not open",
+    "Окна не открылись": "The windows did not open",
+    "Не удалось закрыть приложение": "Could not close the app",
+    "Не удалось удалить окно": "Could not delete the window",
+    "Удалить окно {number}?": "Delete window {number}?",
+    "Контейнер и все его данные будут стёрты: установленные приложения, входы, кеш. Другие окна это не затронет.": "The container and all of its data will be erased: installed apps, logins, cache. Other windows are not affected.",
+    "окно не найдено": "the window was not found",
+    "окно не получило адрес в сети": "the window did not get a network address",
+    "Android в этом окне не загрузился": "Android in this window did not boot",
+    "файл APK не найден": "the APK file was not found",
+    "помощник для контейнеров не найден": "the container helper was not found",
+    "не удалось подготовить помощника для контейнеров: {error}": "could not prepare the container helper: {error}",
+    "не удалось": "it did not work",
+    "Окна работают в основном профиле": "Windows work in the main profile",
+    "у приложения выбран профиль №{number} — кнопка «Запустить» уходит в него, "
+    "и окна с экрана пропадают. Запуск любого окна возвращает контейнер на "
+    "основной профиль.":
+        "the app is set to profile #{number} — the «Launch» button goes there and "
+        "the windows leave the screen. Launching any window returns the container "
+        "to the main profile.",
+    "Открылись не все окна — {details}": "Not every window opened — {details}",
+    "Больше окон Android не даёт: у основного профиля может быть "
+    "только один клон и один рабочий профиль":
+        "Android gives no more windows: the main profile may have only one clone "
+        "and one work profile",
+    "не удалось создать окно": "could not create the window",
+    "не удалось поставить приложение в новое окно":
+        "could not install the app into the new window",
+    "то же приложение с отдельными данными — для второго аккаунта или проверки с чистого листа": "the same app with its own data — for a second account or a clean-slate test",
+    "есть — работает рядом с оригиналом, данные отдельные": "exists — runs next to the original, with separate data",
+    "есть, но окно у контейнера одно: копия и оригинал показываются по очереди — включите отдельные окна в настройках": "exists, but the container has a single window: the copy and the original take turns — turn separate windows on in the settings",
+    "Создать": "Create",
+    "Удалить копию": "Delete the copy",
+    "Удалить копию?": "Delete the copy?",
+    "Данные копии «{name}» будут стёрты: вход, кеш, настройки. Само приложение и его основные данные останутся нетронутыми.": "The data of the «{name}» copy will be erased: the login, the cache, the settings. The app itself and its main data stay untouched.",
+    "создаём копию…": "creating the copy…",
+    "открываем копию…": "opening the copy…",
+    "удаляем копию…": "deleting the copy…",
+    "запущена": "running",
+    "Копия «{name}» готова": "The «{name}» copy is ready",
+    "Копия «{name}» запущена": "The «{name}» copy is running",
+    "Копия удалена": "The copy is deleted",
+    "Не удалось создать копию": "Could not create the copy",
+    "Копия не открылась": "The copy did not open",
+    "Не удалось удалить копию": "Could not delete the copy",
+    "копия этого приложения уже есть": "this app already has a copy",
+    "копии этого приложения нет": "this app has no copy",
+    "этот образ Android не умеет клонировать приложения": "this Android image cannot clone apps",
+    "не удалось создать профиль для копий": "could not create the profile for copies",
+    "не удалось поставить приложение в копию": "could not install the app into the copy",
+    "В контейнере уже {count} профилей — это предел": "The container already holds {count} profiles — that is the limit",
+    "Отдельные окна для приложений": "A separate window per app",
+    "копия и оригинал становятся видны одновременно; полноэкранные игры это "
+    "не берут — Android показывает их по очереди. Контейнер перезапустится":
+        "the copy and the original become visible at the same time; fullscreen games "
+        "do not take it — Android shows them one at a time. The container will restart",
+    "есть — но приложение не разрешает менять размер окна, поэтому копия и "
+    "оригинал показываются по очереди":
+        "exists — but the app does not allow resizing its window, so the copy and the "
+        "original are shown one at a time",
+    "есть — копия живёт в основном профиле, при запуске контейнер "
+    "переключится на него":
+        "exists — the copy lives in the main profile, and the container will switch "
+        "to it on launch",
+    "Не удалось переключить режим окон": "Could not switch the window mode",
+    "Каждое приложение теперь в своём окне": "Every app now gets its own window",
+    "Контейнер снова показывает одно окно": "The container shows a single window again",
     # Ход выполнения шага: фазы из вывода waydroid и счётчики загрузки.
     "Поднимаем контейнер Android": "Bringing the Android container up",
     "Подтвердите пароль в системном окне": "Confirm the password in the system dialog",
@@ -575,4 +711,115 @@ TABLE: dict[str, str] = {
     "fw.max_users, доступ к adb контейнера и перезапуск":
         "fw.max_users, access to the container's adb and a restart",
     "перезапуск после правки правил": "restart after editing the rules",
+
+    # --- Мультиокна / Инстансы / Оптимизация ---
+    "Окна и копии (Multi-Instance)": "Windows & Clones (Multi-Instance)",
+    "+ Окно (Клон)": "+ Window (Clone)",
+    "Создать новое независимое окно этого приложения": "Create a new independent window for this app",
+    "▶ Запустить все": "▶ Launch All",
+    "Открыть все окна одновременно": "Open all windows simultaneously",
+    "⏹ Остановить все": "⏹ Stop All",
+    "Остановить все окна этого приложения": "Stop all windows of this app",
+    "Оптимизация и производительность": "Optimization & Performance",
+    "Режим экономии (Eco Mode)": "Eco Mode",
+    "отключает анимации Android и снижает нагрузку на процессор и видеокарту":
+        "disables Android animations and reduces CPU and GPU load",
+    "Ограничение FPS": "FPS Limit",
+    "лимит кадров в секунду для экономии ресурсов при мультибоксинге":
+        "frame rate limit to save resources during multi-boxing",
+    "Без ограничений (Макс. FPS)": "No limit (Max FPS)",
+    "15 FPS (Макс. экономия)": "15 FPS (Max power save)",
+    "30 FPS (Рекомендуется для окон)": "30 FPS (Recommended for multi-window)",
+    "45 FPS": "45 FPS",
+    "60 FPS": "60 FPS",
+    "Свободный многооконный режим": "Freeform Multi-Window Mode",
+    "принудительно разрешает всем играм и окнам открываться рядом":
+        "forces all games and windows to open side-by-side",
+    "Применить": "Apply",
+    "Очистить память Android (RAM Trim)": "Clean Android RAM (RAM Trim)",
+    "освобождает неактивную оперативную память и сбрасывает кэш":
+        "frees inactive RAM and clears system cache",
+    "Очистить": "Clean",
+    "🟢 Запущено": "🟢 Running",
+    "⚪ Остановлено": "⚪ Stopped",
+    "Запустить это окно": "Launch this window",
+    "Остановить это окно": "Stop this window",
+    "Сбросить данные окна (вход, кэш)": "Reset window data (login, cache)",
+    "Удалить это окно": "Delete this window",
+    "Не удалось загрузить список окон": "Failed to load window list",
+    "Создаём и подписываем новое окно…": "Building and signing new window…",
+    "Не удалось создать окно": "Failed to create window",
+    "Новое окно «{label}» готово!": "New window \"{label}\" is ready!",
+    "Открываем {label}…": "Opening {label}…",
+    "Не удалось открыть окно": "Failed to open window",
+    "Окно {label} запущено": "Window {label} launched",
+    "Окно {label} остановлено": "Window {label} stopped",
+    "Не удалось остановить окно": "Failed to stop window",
+    "Сбросить данные окна?": "Reset window data?",
+    "Данные окна «{label}» будут очищены: вход, кэш и настройки. Остальные окна останутся нетронутыми.":
+        "Window \"{label}\" data will be cleared: login, cache and settings. Other windows will remain untouched.",
+    "Сбросить": "Reset",
+    "Не удалось сбросить данные": "Failed to reset data",
+    "Данные {label} очищены": "Data for {label} cleared",
+    "Удалить окно {label}?": "Delete window {label}?",
+    "Окно «{label}» и все его данные будут полностью удалены из Waydroid.":
+        "Window \"{label}\" and all its data will be completely removed from Waydroid.",
+    "Не удалось удалить окно": "Failed to delete window",
+    "Окно {label} удалено": "Window {label} deleted",
+    "Запускаем все окна…": "Launching all windows…",
+    "Ошибка запуска окон": "Error launching windows",
+    "Все окна запущены!": "All windows launched!",
+    "Останавливаем все окна…": "Stopping all windows…",
+    "Ошибка остановки окон": "Error stopping windows",
+    "Все окна остановлены": "All windows stopped",
+    "Режим экономии включён (анимации отключены)": "Eco Mode enabled (animations disabled)",
+    "Режим экономии выключен": "Eco Mode disabled",
+    "Установлен лимит {fps} FPS": "FPS limit set to {fps} FPS",
+    "Лимит FPS снят": "FPS limit removed",
+    "Применяем настройки многооконности…": "Applying multi-window settings…",
+    "Свободный режим многооконности активен!": "Freeform multi-window mode is active!",
+    "Не удалось применить: {err}": "Failed to apply: {err}",
+    "Очищаем память Android…": "Cleaning Android memory…",
+    "Память Android успешно очищена!": "Android memory successfully cleaned!",
+    "Ошибка очистки памяти: {err}": "Memory cleaning error: {err}",
+    "Окно 0 (Оригинал)": "Window 0 (Original)",
+    "Окно 0 (Основное)": "Window 0 (Main)",
+    "Окно {index}": "Window {index}",
+    "Окно {index} ({name})": "Window {index} ({name})",
+    "Сборка клона #{index}…": "Building clone #{index}…",
+    "Установка окна #{index} в Waydroid…": "Installing window #{index} in Waydroid…",
+    "Не удалось установить клон": "Failed to install clone",
+    "Запуск {name}…": "Launching {name}…",
+    # --------------------------------------------- картинка контейнера ----
+    "Ждём первый кадр приложения…": "Waiting for the app's first frame…",
+    "Запускаем окно {number}… (до трёх минут)":
+        "Starting window {number}… (up to three minutes)",
+    "Закрываем прежнее окно приложения…": "Closing the app's previous window…",
+    "работает · нет сети — нужен перезапуск окна":
+        "running · no network — the window needs a restart",
+    "работает · не отвечает — нужен перезапуск окна":
+        "running · not answering — the window needs a restart",
+    "Готовим машину к старту контейнера…":
+        "Getting the machine ready for the container…",
+    "Android не отвечает — возвращаем…": "Android is not answering — bringing it back…",
+    "Картинка Android застряла — возвращаем…":
+        "Android's picture is stuck — bringing it back…",
+    "Окно не появилось — возвращаем картинку Android…":
+        "No window appeared — bringing Android's picture back…",
+    "Waydroid запустил приложение, но окна на экране так и нет":
+        "Waydroid started the app, but no window ever reached the screen",
+    "приложение запустилось, но картинки в этом окне нет":
+        "the app started, but this window shows no picture",
+    "Картинка застряла — перезапускаем окно {number}…":
+        "The picture is stuck — restarting window {number}…",
+    "контейнер не отвечает: список приложений пуст":
+        "the container is not answering: the list of apps came back empty",
+    "запуск не удался": "the launch failed",
+    "Запуск окна не удался": "Failed to launch window",
+    "Файл клона не найден, создайте его заново": "Clone file not found, please create it again",
+    "Создаём клон-профиль…": "Creating clone profile…",
+    "Создаём рабочий профиль…": "Creating work profile…",
+    "Активируем приложение в новом окне…": "Activating app in new window…",
+    "Достигнут максимум профилей Android в контейнере": "Maximum Android profile limit reached in container",
+    "Окно не найдено": "Window not found",
 }

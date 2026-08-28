@@ -12,17 +12,20 @@ sudo -A, пароль спрашивает системный диалог и о
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from gi.repository import Gio, GLib
 
+from . import cloner
 from .hostexec import Cache, host_argv, in_thread, run as _run, succeeds as _ok
 from .i18n import tr
-from .library import Entry
+from .library import Entry, data_root
 
 
 class WaydroidError(Exception):
@@ -125,8 +128,55 @@ def native_bridge() -> str:
     # За имя транслятора принимаем только то, что им выглядит.
     if value in ("", "0", "none") or " " in value or not value.endswith(".so"):
         value = ""
+    # Свойства мало: сама библиотека лежит в оверлее Waydroid, а тот
+    # отключается при первой же неудаче монтирования и запись об этом
+    # остаётся только в waydroid.cfg. Тогда свойство обещает трансляцию,
+    # которой нет, а ARM-приложения падают с UnsatisfiedLinkError —
+    # «dlopen ... is for EM_AARCH64 instead of EM_X86_64».
+    if value and adb_available():
+        with suppress(WaydroidError):
+            adb_connect()
+            # Команду отдаём одной строкой: adb склеивает аргументы и
+            # заново делит их на своей стороне, поэтому вложенный sh -c
+            # терял путь, и ls показывал корень.
+            found = _adb(["shell", f"ls /system/lib64/{value}"], timeout=60)
+            if value not in found.stdout:
+                value = ""
     _bridge_cache.set(value)
     return value
+
+
+def overlays_disabled() -> bool:
+    """Отключён ли оверлей Waydroid — тот, в котором живёт транслятор.
+
+    Waydroid выключает его сам, если монтирование однажды не удалось, и
+    больше не пробует. Снаружи это выглядит как «ARM-приложения перестали
+    запускаться», причём во всех контейнерах разом.
+    """
+    for line in _host_file("/var/lib/waydroid/waydroid.cfg").splitlines():
+        if line.strip().lower().startswith("mount_overlays"):
+            return line.split("=", 1)[1].strip().lower() == "false"
+    return False
+
+
+def overlay_step() -> Step:
+    """Возвращает оверлей на место и перезапускает сессию."""
+    helper = askpass_helper()
+    sudo = f"env SUDO_ASKPASS={_quote(helper)} sudo -A " if helper else "sudo "
+    script = (
+        f"{sudo}sed -i 's/^mount_overlays = False/mount_overlays = True/' "
+        "/var/lib/waydroid/waydroid.cfg; "
+        "waydroid session stop >/dev/null 2>&1; sleep 3; "
+        "setsid waydroid session start >/dev/null 2>&1 & sleep 25; true"
+    )
+    return Step(
+        key="overlay",
+        title=tr("Вернуть транслятор ARM64"),
+        hint=tr("Waydroid отключил оверлей, а в нём libhoudini — контейнер перезапустится"),
+        argv=["sh", "-c", script],
+        root=True,
+        minutes=2,
+    )
 
 
 def forget_state() -> None:
@@ -209,6 +259,7 @@ def install_and_launch_async(
             )
 
     def work():
+        ensure_container_alive(stage)
         if multiuser and entry.profile:
             ensure_session(stage)
             stage(tr("Готовим профиль Android…"))
@@ -224,7 +275,7 @@ def install_and_launch_async(
             if URLFORWARD_PACKAGE in packages_for_user(0):
                 set_browser_role(user)
             stage(tr("Открываем…"))
-            launch_for_user(entry, user)
+            launch_for_user(entry, user, stage)
             return True
 
         # Запись запускается в основном профиле, а контейнер мог остаться в
@@ -246,7 +297,7 @@ def install_and_launch_async(
             install_apk(entry)
             _installed_cache.clear()
         stage(tr("Открываем…"))
-        launch_apk(entry)
+        launch_apk(entry, stage)
         return True
 
     in_thread(work, lambda _result, error: callback(error))
@@ -674,6 +725,13 @@ def display_step(monitor: tuple[int, int]) -> Step | None:
     не будет ни там, ни там — они появляются только от wm size, поэтому
     его переопределение мы снимаем.
     """
+    # Размер окон теперь выбирает человек, и он общий для всех
+    # (waydroid_base.prop). Пока этот шаг об этом не знал, он при каждом
+    # запуске мастера молча возвращал размер монитора — то есть отменял
+    # выбранное. Если размер задан, мастеру здесь делать нечего.
+    if all(global_size()):
+        return None
+
     stretch = gamescope_works()
     render = recommended_render(monitor) if stretch else monitor
     if not render[0]:
@@ -734,8 +792,16 @@ def display_step(monitor: tuple[int, int]) -> Step | None:
 
 
 def plan(needs_bridge: bool, monitor: tuple[int, int] = (0, 0)) -> list[Step]:
-    """Чего не хватает — в порядке выполнения. Готовое не попадает."""
+    """Чего не хватает — в порядке выполнения. Готовое не попадает.
+
+    Проверки идут через adb, и каждая ждёт своего таймаута. Пока Android
+    внутри не отвечает, это складывается в минуты молчаливого ожидания —
+    мастер выглядит зависшим. Поэтому сначала короткий вопрос: жива ли
+    система вообще.
+    """
     steps: list[Step] = []
+    if session_running() and not system_ready(container_ip(), timeout=10):
+        return [container_restart_step()]
 
     if not kernel_has_binder():
         steps.append(
@@ -811,6 +877,11 @@ def plan(needs_bridge: bool, monitor: tuple[int, int] = (0, 0)) -> list[Step]:
                 background=True,
             )
         )
+
+    # Отключённый оверлей чинить надо раньше всего: без него нет
+    # транслятора, и ARM-приложения падают во всех контейнерах сразу.
+    if overlays_disabled():
+        steps.append(overlay_step())
 
     if firewall_blocks_container():
         steps.append(_firewall_step())
@@ -1027,6 +1098,15 @@ def _ndk_step(target: str = DEFAULT_BRIDGE) -> Step:
 _BRIDGE_TEMPLATE = (
     "set -e; "
     'U=${SUDO_USER:-$(id -un)}; D=__WORKDIR__; '
+    # waydroid_script считает провалом ЛЮБОЙ вывод в stderr, даже при
+    # нулевом коде возврата. А `waydroid container stop` пишет туда обычное
+    # сообщение «Stopping container» — но только когда контейнер работает.
+    # Отсюда отказ на ровном месте: «returned non-zero exit status 0».
+    # Гасим контейнер заранее, тогда его собственный stop промолчит.
+    'echo "останавливаем контейнер перед установкой"; '
+    "waydroid session stop >/dev/null 2>&1 || true; "
+    "waydroid container stop >/dev/null 2>&1 || true; "
+    "sleep 2; "
     'echo "готовим waydroid_script от имени $U"; '
     # Чистим каталог здесь, под root: прошлый запуск оставил в нём
     # __pycache__ от имени root, и пользователь такое удалить не может.
@@ -1633,6 +1713,14 @@ def installed_packages() -> set[str]:
         for line in result.stdout.splitlines()
         if line.strip().startswith("packageName:")
     }
+    if not packages:
+        # Пустой список — не «ничего не установлено», а «служба не
+        # ответила»: системные приложения в контейнере есть всегда. Раньше
+        # Merci принимала молчание за чистую страницу и ставила APK заново —
+        # долгая установка вместо внятного отказа.
+        raise ContainerUnreachable(
+            tr("контейнер не отвечает: список приложений пуст")
+        )
     _installed_cache.set(packages)
     return packages
 
@@ -1645,6 +1733,10 @@ def install_apk(entry: Entry) -> None:
     # Служба Waydroid и здесь умеет отказать, выйдя с нулевым кодом.
     if result.returncode != 0 or any(m in text for m in _CONFLICT_MARKERS):
         _raise_install_error(text)
+
+
+class PictureStuck(WaydroidError):
+    """Приложение работает, а картинки нет: контейнер потерял поверхность."""
 
 
 class NeedsConfirmation(WaydroidError):
@@ -1766,6 +1858,9 @@ def ensure_session(stage=None) -> None:
     перезапуском сессии, что здесь и делается.
     """
     if not session_running():
+        # Порядок обязателен: пока работают дополнительные окна, оверлей
+        # Waydroid не встанет, и транслятор ARM пропадёт у всех.
+        prepare_session_start(stage)
         if stage is not None:
             stage(tr("Поднимаем контейнер…"))
         _run(["sh", "-c", "setsid waydroid session start >/dev/null 2>&1 &"], timeout=30)
@@ -1784,7 +1879,39 @@ def ensure_session(stage=None) -> None:
     restart_session(stage)
 
 
+def ensure_container_alive(stage=None) -> None:
+    """Приводит контейнер в состояние, в котором можно ставить и запускать.
+
+    Проверка стоит копейки, а спасает от самого долгого способа ничего не
+    добиться. Контейнер бывает наполовину жив: system_server уже убит
+    сторожем, или SurfaceFlinger заклинило после закрытия окна — и тогда
+    каждая следующая команда молча выжидает свой таймаут adb. Установка
+    при этом «не находит» ни одного приложения и начинается заново, запуск
+    отвечает успехом, а окна нет. Со стороны это выглядит как бесконечная
+    проверка, из которой ничего не следует.
+    """
+    if not session_running():
+        return  # выключенный контейнер поднимут ensure_session и app launch
+    ip = container_ip()
+    if ip and system_ready(ip, 10) and screen_state(ip=ip) != "затор":
+        return
+    if stage is not None:
+        stage(tr("Android не отвечает — возвращаем…"))
+    restart_session(stage)
+
+
 _IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _bridge_neighbours() -> dict[str, str]:
+    """{адрес: MAC} для всего, что видно на мосту контейнеров."""
+    found: dict[str, str] = {}
+    result = _run(["ip", "neigh", "show", "dev", "waydroid0"], timeout=30)
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "lladdr" and "FAILED" not in line:
+            found[parts[0]] = parts[2].lower()
+    return found
 
 
 def container_ip() -> str:
@@ -1798,21 +1925,135 @@ def container_ip() -> str:
 
     Поэтому за адрес принимаем только то, что им выглядит.
     """
+    reported = ""
     for line in _run(["waydroid", "status"], timeout=40).stdout.splitlines():
         if "IP address" in line:
             value = line.split(":", 1)[1].strip()
-            return value if _IPV4.match(value) else ""
+            reported = value if _IPV4.match(value) else ""
+            break
+
+    # Когда рядом работают дополнительные контейнеры, waydroid status
+    # показывает адрес первого попавшегося соседа на мосту — то есть может
+    # назвать чужой. Свои контейнеры мы знаем по MAC: если он назвал один
+    # из них, ищем на мосту тот, что не наш.
+    ours = {instance_mac(number) for number in _registry()}
+    if not ours:
+        return reported
+
+    # Живые соседи, которые не наши дополнительные окна. Верить одному
+    # только waydroid status нельзя: после перезапуска он называет и вовсе
+    # исчезнувшие адреса из старых аренд DHCP.
+    neighbours = _bridge_neighbours()
+    mine = [address for address, mac in neighbours.items() if mac not in ours]
+
+    # Сразу после перезапуска таблица соседей пуста: контейнер ещё не
+    # сказал ни слова, а waydroid status уже называет адрес — иногда из
+    # старой аренды DHCP. Стучимся по нему один раз: если там кто-то есть,
+    # в таблице появится MAC, и его уже можно проверить.
+    if not mine and reported:
+        _run(["ping", "-c", "1", "-W", "1", reported], timeout=15)
+        neighbours = _bridge_neighbours()
+        mine = [address for address, mac in neighbours.items() if mac not in ours]
+
+    if reported in mine:
+        return reported
+    if mine:
+        return mine[0]
+    # Проверить не удалось: адрес называет только waydroid status, а на
+    # мосту его нет даже после запроса. Верить такому нельзя — рядом с
+    # дополнительными окнами это чаще всего чужая или отжившая аренда.
+    # Пустой ответ честнее: вызывающий подождёт и спросит ещё раз.
     return ""
 
 
 def wait_for_ip(seconds: int = 60) -> str:
-    """Ждёт, пока контейнер получит адрес. Пусто — не дождались."""
+    """Ждёт адрес контейнера — и не любой, а отвечающий.
+
+    Пока рядом живут дополнительные окна, в таблице соседей и в ответе
+    waydroid status попадаются адреса из прежних аренд DHCP. Принять такой
+    значит потом получить «device not found» от adb на ровном месте,
+    поэтому адрес считается годным только когда по нему отзывается adb.
+    """
     deadline = time.time() + seconds
+    fallback = ""
     while True:
         address = container_ip()
-        if address or time.time() >= deadline:
-            return address
+        if address:
+            fallback = address
+            if not adb_available():
+                return address
+            _run(["adb", "connect", f"{address}:{_ADB_PORT}"], timeout=30)
+            state = _run(["adb", "-s", f"{address}:{_ADB_PORT}", "get-state"], timeout=20)
+            if state.stdout.strip() == "device":
+                return address
+        if time.time() >= deadline:
+            return fallback
         time.sleep(2)
+
+
+_size_healed = False
+
+
+def heal_main_size(stage=None) -> None:
+    """Приводит основной контейнер к общему размеру окон.
+
+    Размер мог разойтись: раньше это делал шаг мастера, а вообще любое
+    прямое обращение к waydroid prop. Правим один раз за запуск Merci —
+    иначе легко получить круг из перезапусков.
+    """
+    global _size_healed
+    if _size_healed:
+        return
+    wanted = global_size()
+    if not all(wanted):
+        return
+    ip = container_ip()
+    if not ip or display_size(ip) == wanted:
+        return
+
+    _size_healed = True
+    if stage is not None:
+        stage(tr("Приводим размер основного окна к общему…"))
+    _run(["waydroid", "prop", "set", "persist.waydroid.width", str(wanted[0])], timeout=90)
+    _run(["waydroid", "prop", "set", "persist.waydroid.height", str(wanted[1])], timeout=90)
+    _apply_size_inside(ip, wanted[0], wanted[1])
+    restart_session(stage)
+
+
+def prepare_session_start(stage=None) -> None:
+    """Готовит машину к старту основной сессии.
+
+    Порядок здесь не вкусовщина, а требование: пока работают
+    дополнительные контейнеры, они держат прежнее монтирование образа, и
+    оверлей Waydroid не встаёт. Waydroid на это отвечает раз и навсегда —
+    пишет в конфиг mount_overlays = False и больше не пробует. Вместе с
+    оверлеем пропадает libhoudini, и ARM-приложения перестают
+    запускаться во ВСЕХ контейнерах, включая основной.
+    """
+    from .settings import Settings
+
+    extra = [
+        item["number"]
+        for item in instances()
+        if item["number"] != 1 and item["state"] == "RUNNING"
+    ]
+    # Размер окон живёт в waydroid_base.prop, а этот файл Waydroid
+    # пересобирает с нуля при обновлении образа. Выбор человека хранится у
+    # нас, поэтому возвращаем его на место, если пропал.
+    chosen = Settings().window_size
+    need_size = all(chosen) and global_size() != chosen
+
+    if not extra and not need_size and not overlays_disabled():
+        return
+
+    # Всё под root делается одной командой: по отдельности это три запроса
+    # пароля подряд, и достаточно пропустить один, чтобы машина осталась на
+    # середине — с выключенным оверлеем и без транслятора ARM.
+    if stage is not None:
+        stage(tr("Готовим машину к старту контейнера…"))
+    width, height = chosen if need_size else (0, 0)
+    with suppress(WaydroidError):
+        _instance_call("prepare", str(width), str(height), timeout=420)
 
 
 def restart_session(stage=None) -> None:
@@ -1821,10 +2062,11 @@ def restart_session(stage=None) -> None:
     Это же лекарство от состояния «сессия запущена, а сети нет», в котором
     контейнер иногда просыпается после перезагрузки машины.
     """
+    prepare_session_start(stage)
     if stage is not None:
         stage(tr("Перезапускаем контейнер…"))
     _run(["waydroid", "session", "stop"], timeout=60)
-    _run(["sh", "-c", "pkill -9 -f 'waydroid session start' || true"], timeout=15)
+    _run(["sh", "-c", "pkill -9 -f '[w]aydroid session start' || true"], timeout=15)
 
     # Убеждаемся, что сессия правда легла: `session stop` регулярно упирается
     # в таймаут D-Bus и молча оставляет всё как было. Запустить поверх живой
@@ -1857,6 +2099,29 @@ def restart_session(stage=None) -> None:
         except WaydroidError as failure:
             raise ContainerUnreachable(str(failure)) from failure
 
+    # Android внутри иногда застревает на загрузке: адреса по DHCP нет,
+    # службы пакетов нет, сторож убивает system_server по кругу. Сессию
+    # перезапускать бесполезно — помогает перезапуск службы контейнера.
+    # Делаем это один раз и молча, иначе человек остаётся с мёртвым окном
+    # и сообщением, из которого ничего не следует.
+    if not wait_system_ready(container_ip(), 90):
+        if stage is not None:
+            stage(tr("Android не поднялся — перезапускаем контейнер целиком…"))
+        with suppress(WaydroidError):
+            _instance_call("restart-container", timeout=180)
+        time.sleep(5)
+        _run(["sh", "-c", "setsid waydroid session start >/dev/null 2>&1 &"], timeout=30)
+        forget_state()
+        for _ in range(60):
+            time.sleep(2)
+            if session_running():
+                break
+        wait_for_ip(120)
+        if not wait_system_ready(container_ip(), 120):
+            raise ContainerUnreachable(
+                tr("Android внутри не отвечает — помогает полный перезапуск контейнера")
+            )
+
 
 def restart_session_async(callback, on_stage=None) -> None:
     def stage(text):
@@ -1870,10 +2135,27 @@ def adb_available() -> bool:
     return _ok(["sh", "-c", "command -v adb >/dev/null"])
 
 
-def _adb(args: list[str], timeout: int = 120):
+def _require_ip() -> str:
+    """Адрес контейнера или внятная ошибка вместо него.
+
+    Пустой адрес значит две очень разные вещи. Контейнер может быть
+    выключен — тогда так и говорим. А может уже числиться запущенным, пока
+    сеть внутри поднимается: первые секунды после старта waydroid пишет
+    «IP address: UNKNOWN». Раньше в обоих случаях выходило «контейнер не
+    запущен» — и человек видел это в карточке, глядя на работающую игру.
+    """
     ip = container_ip()
-    if not ip:
-        raise WaydroidError(tr("контейнер не запущен"))
+    if ip:
+        return ip
+    if status()[0]:
+        raise ContainerUnreachable(
+            tr("контейнер ещё поднимается — сеть внутри не готова")
+        )
+    raise WaydroidError(tr("контейнер не запущен"))
+
+
+def _adb(args: list[str], timeout: int = 120):
+    ip = _require_ip()
     return _run(["adb", "-s", f"{ip}:{_ADB_PORT}", *args], timeout=timeout)
 
 
@@ -1891,13 +2173,12 @@ def adb_connect() -> None:
     до ручного `adb disconnect`. Поэтому при неудаче рвём подключение сами и
     пробуем заново.
 
-    Отказы здесь разного смысла: «unauthorized» значит, что внутри Android
-    висит вопрос, разрешить ли отладку, и повторять попытки бессмысленно.
+    Отказы здесь разного смысла: «unauthorized» значит, что контейнер не
+    знает наш ключ. Подтвердить запрос внутри Android некому — окна с
+    вопросом нет, — поэтому ключ кладём сами, через помощника с правами
+    root, и пробуем ещё раз.
     """
-    ip = container_ip()
-    if not ip:
-        raise WaydroidError(tr("контейнер не запущен"))
-
+    ip = _require_ip()
     target = f"{ip}:{_ADB_PORT}"
     text = ""
     # Попыток несколько и с паузами: адрес у контейнера появляется раньше,
@@ -1913,6 +2194,10 @@ def adb_connect() -> None:
         last = text.splitlines()[-1].strip() if text else ""
         if state.returncode == 0 and last == "device":
             return
+        if "unauthorized" in text.lower() and attempt == 0:
+            with suppress(WaydroidError):
+                _instance_call("adb-key", "1", timeout=180)
+            time.sleep(3)
         if "unauthorized" in text:
             raise WaydroidError(
                 tr("контейнер просит разрешить отладку: откройте окно Android и "
@@ -1964,6 +2249,1571 @@ def remove_android_user(user: int) -> None:
         # Себя Android удалить не даст, поэтому сперва уходим в основной.
         switch_android_user(0)
     _adb(["shell", "pm", "remove-user", str(user)], timeout=120)
+
+
+# Тип профиля-клона из Android 13. Клон — это профиль пользователя 0, а не
+# отдельный пользователь: он работает ОДНОВРЕМЕННО с основным, поэтому копия
+# приложения живёт рядом с оригиналом. Обычные профили так не умеют — на них
+# контейнер приходится переключать, и оригинал уходит с экрана.
+CLONE_USER_TYPE = "android.os.usertype.profile.CLONE"
+
+# Потолок на всякий случай: каждый клон — это ещё один набор данных
+# приложения, и бесконечно их плодить незачем.
+MAX_USER_SLOTS = 16
+
+_USER_INFO = re.compile(r"UserInfo\{(\d+):([^:]*):")
+
+
+def multi_windows_on() -> bool:
+    """Показывает ли Waydroid каждое приложение отдельным окном.
+
+    От этого зависит, увидит ли человек копию и оригинал одновременно:
+    в однооконном режиме контейнер рисует что-то одно.
+    """
+    return _prop("persist.waydroid.multi_windows") == "true"
+
+
+def set_multi_windows(enabled: bool) -> None:
+    """Переключает многооконный режим и перезапускает сессию.
+
+    Свойство persist.* читается при старте сессии, поэтому без перезапуска
+    переключатель бы ничего не изменил, а выглядел бы рабочим.
+    """
+    _run(
+        ["waydroid", "prop", "set", "persist.waydroid.multi_windows",
+         "true" if enabled else "false"],
+        timeout=90,
+    )
+    if status(use_cache=False)[0]:
+        restart_session()
+
+
+def app_resizable(package: str) -> bool:
+    """Разрешает ли приложение менять размер своего окна.
+
+    Игры почти всегда объявляют обратное
+    (PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_UNRESIZEABLE), и тогда Android
+    держит их задачи полноэкранными, а такие показываются строго по одной.
+    Значит копия и оригинал будут сменять друг друга, а не стоять рядом, —
+    и об этом честнее сказать заранее, чем показать пустой экран.
+    """
+    if not adb_available():
+        return True
+    try:
+        adb_connect()
+        result = _adb(["shell", "dumpsys", "package", package], timeout=90)
+    except WaydroidError:
+        return True
+    return "RESIZE_MODE_UNRESIZEABLE" not in result.stdout
+
+
+# Дополнительные контейнеры: по одному Android на окно. Профили этого не
+# дают — их показывает только текущий пользователь Android, и соседей у
+# основного ровно два. Контейнер же полностью свой: свои данные, свой
+# binder, своё окно; предел — только память.
+_INSTANCES_SRC = "/app/share/merci/instances"
+
+
+def _instance_helper() -> str:
+    """Кладёт помощника в данные Merci и отдаёт путь, видимый хосту.
+
+    Внутрь песочницы система не заглядывает, поэтому скрипт, который
+    запускается через sudo, должен лежать в общем каталоге данных.
+    Перезаписываем каждый раз: версия Merci могла смениться.
+    """
+    target = os.path.join(_data_root(), "instances", "merci-instance.py")
+    source = os.path.join(_INSTANCES_SRC, "merci-instance.py")
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if os.path.exists(source):
+            shutil.copyfile(source, target)
+        os.chmod(target, 0o755)
+    except OSError as exc:
+        raise WaydroidError(
+            tr("не удалось подготовить помощника для контейнеров: {error}", error=exc)
+        ) from exc
+    if not os.path.exists(target):
+        raise WaydroidError(tr("помощник для контейнеров не найден"))
+    return target
+
+
+def _instance_call(*argv: str, timeout: int = 240):
+    """Зовёт помощника с правами root и разбирает его ответ.
+
+    Пароль спрашивает системное окно, Merci его не видит — тот же путь,
+    что и у шагов подготовки.
+    """
+    helper = _instance_helper()
+    askpass = askpass_helper()
+    home = os.path.expanduser("~")
+    prefix = f"env SUDO_ASKPASS={_quote(askpass)} sudo -A " if askpass else "sudo "
+    command = (
+        prefix
+        + f"python3 {_quote(helper)} --home {_quote(home)} "
+        + " ".join(_quote(part) for part in argv)
+    )
+    result = _run(["sh", "-c", command], timeout=timeout)
+    text = (result.stdout or "").strip()
+    if result.returncode != 0:
+        raise WaydroidError((result.stderr or text).strip() or tr("не удалось"))
+    try:
+        return json.loads(text.splitlines()[-1]) if text else None
+    except (ValueError, IndexError) as exc:
+        raise WaydroidError(text or str(exc)) from exc
+
+
+def _registry_path() -> str:
+    return os.path.join(_data_root(), "instances.json")
+
+
+def _registry() -> dict[int, str]:
+    """Заведённые окна: номер → чьи они. Помнит Merci, а не система.
+
+    Спрашивать об этом систему пришлось бы через root, а список нужен на
+    каждое открытие карточки — тогда пароль спрашивали бы постоянно.
+
+    Окно принадлежит записи библиотеки, а не приложению вообще: в
+    контейнере своя копия данных, и заведено оно было для конкретной
+    сборки. Пустой владелец — окна из прежних версий Merci, когда список
+    был общим; они достаются первой карточке, которую откроют.
+    """
+    try:
+        with open(_registry_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if isinstance(data, list):  # прежний вид: просто номера
+        return {int(n): "" for n in data if int(n) > 1}
+    if isinstance(data, dict):
+        return {int(n): str(owner) for n, owner in data.items() if int(n) > 1}
+    return {}
+
+
+def _registry_set(mapping: dict[int, str]) -> None:
+    try:
+        os.makedirs(os.path.dirname(_registry_path()), exist_ok=True)
+        with open(_registry_path(), "w", encoding="utf-8") as handle:
+            json.dump({str(n): owner for n, owner in sorted(mapping.items())}, handle)
+    except OSError:
+        pass
+
+
+def adopt_orphan_instances(owner: str) -> list[int]:
+    """Отдаёт этой записи окна, заведённые до разделения по приложениям."""
+    if not owner:
+        return []
+    реестр = _registry()
+    ничьи = [number for number, чьё in реестр.items() if not чьё]
+    if not ничьи:
+        return []
+    for number in ничьи:
+        реестр[number] = owner
+    _registry_set(реестр)
+    return sorted(ничьи)
+
+
+def instance_mac(number: int) -> str:
+    """Тот же расчёт, что и в помощнике: адрес зависит от номера."""
+    return f"00:16:3e:f9:d3:{0x03 + number - 1:02x}"
+
+
+def instance_ip(number: int) -> str:
+    """Адрес контейнера по его MAC — из таблицы соседей моста, без root."""
+    if number == 1:
+        return container_ip()
+    mac = instance_mac(number)
+    for address, found in _bridge_neighbours().items():
+        if found == mac:
+            return address
+    return ""
+
+
+def instance_running(number: int) -> bool:
+    """Работает ли контейнер окна — по самому контейнеру, а не по сети.
+
+    Раньше Merci судила по адресу и ответу adb, и контейнер без сети
+    считался остановленным. Это не мелочь в показаниях: такой контейнер
+    держит монтирование образа, из-за чего у основной сессии не встаёт
+    оверлей — а вместе с ним пропадает транслятор ARM у всех окон сразу.
+    Merci же не гасила его перед стартом сессии, потому что для неё он был
+    выключен.
+
+    Смотрим на процесс: дополнительные окна поднимаются `lxc-start -F`, и
+    этот процесс живёт ровно столько, сколько живёт контейнер. Root для
+    этого не нужен — чужие процессы видно и так.
+    """
+    if number == 1:
+        return status()[0]
+    name = container_name(number)
+    result = _run(["ps", "-eo", "args="], timeout=20)
+    for line in result.stdout.splitlines():
+        words = line.split()
+        if not words or "lxc-start" not in words[0]:
+            continue
+        if "-n" in words and words[words.index("-n") + 1 :][:1] == [name]:
+            return True
+    return False
+
+
+def container_name(number: int) -> str:
+    return "waydroid" if number == 1 else f"waydroid{number}"
+
+
+def instances(owner: str = "") -> list[dict]:
+    """Контейнеры: номер, состояние, адрес. Первый — основной.
+
+    С непустым ``owner`` показываются только окна этой записи библиотеки:
+    у каждого приложения свои клоны, и чужие в его карточке ни к чему.
+    Основное окно общее — оно у Waydroid одно на всех.
+
+    Всё делается без root: номера помним сами, состояние берём у процесса
+    контейнера, адрес — из таблицы соседей на мосту. Пароль остаётся для
+    действий: создать, запустить, погасить, удалить.
+    """
+    реестр = _registry()
+    if owner:
+        adopt_orphan_instances(owner)
+        реестр = _registry()
+        свои = sorted(n for n, чьё in реестр.items() if чьё == owner)
+    else:
+        свои = sorted(реестр)
+
+    items = []
+    for number in [1] + свои:
+        ip = instance_ip(number)
+        state = "RUNNING" if instance_running(number) else "STOPPED"
+        items.append({"number": number, "state": state, "ip": ip})
+    return items
+
+
+def next_instance_number() -> int:
+    """Первый свободный номер начиная со второго."""
+    taken = {item.get("number") for item in instances()}
+    number = 2
+    while number in taken:
+        number += 1
+    return number
+
+
+def create_instance(number: int, owner: str = "") -> dict:
+    result = _instance_call("create", str(number), timeout=300) or {}
+    реестр = _registry()
+    реестр[number] = owner
+    _registry_set(реестр)
+    return result
+
+
+def start_instance(number: int) -> dict:
+    """Поднимает окно и приводит его размер к общему.
+
+    У контейнера, которому размер когда-то задавали отдельно, значение
+    осталось в его собственном складе свойств и перебивает общее из
+    waydroid_base.prop. Пока он выключен, поправить это нечем — свойства
+    живут внутри. Поэтому сверяем после запуска и, если разошлось,
+    переписываем и поднимаем ещё раз: одна лишняя загрузка, зато дальше
+    окно ведёт себя как все.
+    """
+    # Помощник внутри ждёт сеть и при нужде перезапускает окно — на это
+    # уходит до четырёх минут, и обрывать его на середине нельзя.
+    result = _instance_call("start", str(number), timeout=420) or {}
+
+    ip = wait_instance_ip(number)
+    if not ip or not wait_instance_ready(ip):
+        return result
+
+    # Окно должно быть настроено как основное: сессия Waydroid и Merci
+    # правят основной контейнер под себя, а дополнительные поднимаются
+    # напрямую и об этих правках не знают.
+    надо_перезапустить = bool(inherit_main_props(ip))
+
+    wanted = global_size()
+    if all(wanted) and display_size(ip) != wanted:
+        _apply_size_inside(ip, wanted[0], wanted[1])
+        надо_перезапустить = True
+
+    if not надо_перезапустить:
+        return result
+
+    # Эти свойства читаются при старте — без перезагрузки они не в счёт.
+    return _instance_call("restart", str(number), timeout=420) or result
+
+
+def restart_instance(number: int) -> dict:
+    """Гасит окно и поднимает заново — один заход под root, один пароль."""
+    return _instance_call("restart", str(number), timeout=420) or {}
+
+
+def _host_file(path: str) -> str:
+    """Читает файл хоста. Из песочницы /var/lib/waydroid не виден вовсе,
+    и обычный open() тихо отвечает «нет такого файла» — а это не то же
+    самое, что «настройка выключена»."""
+    return _run(["cat", path], timeout=30).stdout
+
+
+def global_size() -> tuple[int, int]:
+    """Общий размер окон из базовых свойств контейнеров."""
+    values = {}
+    for line in _host_file("/var/lib/waydroid/waydroid_base.prop").splitlines():
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    try:
+        return (
+            int(values.get("persist.waydroid.width", 0) or 0),
+            int(values.get("persist.waydroid.height", 0) or 0),
+        )
+    except ValueError:
+        return 0, 0
+
+
+def display_size(ip: str) -> tuple[int, int]:
+    """Физический размер дисплея контейнера."""
+    try:
+        text = instance_adb(ip, ["shell", "wm size"], timeout=60).stdout
+    except WaydroidError:
+        return 0, 0
+    match = re.search(r"Physical size:\s*(\d+)x(\d+)", text)
+    return (int(match.group(1)), int(match.group(2))) if match else (0, 0)
+
+
+def stop_instance(number: int) -> dict:
+    return _instance_call("stop", str(number), timeout=180) or {}
+
+
+def remove_instance(number: int) -> dict:
+    result = _instance_call("remove", str(number), timeout=300) or {}
+    реестр = _registry()
+    реестр.pop(number, None)
+    _registry_set(реестр)
+    return result
+
+
+def wait_instance_ip(number: int, seconds: int = 120) -> str:
+    """Ждёт адрес контейнера: сеть внутри поднимается не мгновенно."""
+    deadline = time.time() + seconds
+    while True:
+        for item in instances():
+            if item.get("number") == number and item.get("ip"):
+                return item["ip"]
+        if time.time() >= deadline:
+            return ""
+        time.sleep(4)
+
+
+def instance_adb(ip: str, args: list[str], timeout: int = 120):
+    """Команда adb в конкретный контейнер.
+
+    Своего adb_connect на каждый вызов не делаем — только при отказе:
+    подключение живёт долго, а лишний connect стоит секунды.
+    """
+    target = f"{ip}:{_ADB_PORT}"
+    result = _run(["adb", "-s", target, *args], timeout=timeout)
+    text = (result.stdout + result.stderr).lower()
+    if result.returncode != 0 and ("not found" in text or "offline" in text or "unauthorized" in text):
+        _run(["adb", "disconnect", target], timeout=30)
+        _run(["adb", "connect", target], timeout=60)
+        result = _run(["adb", "-s", target, *args], timeout=timeout)
+    return result
+
+
+def host_windows() -> list[dict]:
+    """Окна контейнеров на хосте: пакет, размер, в фокусе ли.
+
+    Спрашиваем композитор. Пока умеем только Hyprland — на остальных
+    вернётся пусто, и подгонка просто не предложится: обещать то, чего не
+    можем узнать, хуже, чем промолчать.
+    """
+    result = _run(["sh", "-c", "hyprctl clients -j 2>/dev/null"], timeout=30)
+    try:
+        data = json.loads(result.stdout or "[]")
+    except ValueError:
+        return []
+
+    windows = []
+    for item in data:
+        name = str(item.get("class") or "")
+        if not name.startswith("waydroid."):
+            continue
+        size = item.get("size") or [0, 0]
+        windows.append(
+            {
+                "package": name[len("waydroid."):],
+                "width": int(size[0]),
+                "height": int(size[1]),
+                "focused": item.get("focusHistoryID") == 0,
+            }
+        )
+    return windows
+
+
+def window_for_package(package: str) -> dict | None:
+    """Окно этого приложения на хосте. Если их несколько — то, что в фокусе."""
+    windows = [w for w in host_windows() if w["package"] == package]
+    if not windows:
+        return None
+    for window in windows:
+        if window["focused"]:
+            return window
+    return windows[0]
+
+
+def set_global_size(width: int, height: int, stage=None) -> None:
+    """Задаёт размер окна сразу всем контейнерам — и будущим тоже.
+
+    Размер живёт в waydroid_base.prop: этот файл читают все контейнеры при
+    старте, поэтому запись туда действует и на уже созданные окна, и на те,
+    что появятся позже. Отдельно правим ещё и свойства внутри работающих
+    контейнеров: у каждого свой склад свойств, и прежнее значение оттуда
+    перебило бы общее.
+    """
+    if width < 320 or height < 240:
+        raise WaydroidError(tr("окно слишком мало для подгонки"))
+
+    # Свойства внутри работающих контейнеров правим заранее и без root:
+    # у каждого свой склад, и прежнее значение оттуда перебивает общее.
+    # Читаются они при старте — значит подействуют на перезапуске ниже.
+    if stage is not None:
+        stage(tr("Записываем размер для всех окон…"))
+    for item in instances():
+        if item["state"] == "RUNNING" and item["ip"]:
+            _apply_size_inside(item["ip"], width, height)
+
+    # Основной контейнер берёт размер из настроек самого Waydroid.
+    _run(["waydroid", "prop", "set", "persist.waydroid.width", str(width)], timeout=90)
+    _run(["waydroid", "prop", "set", "persist.waydroid.height", str(height)], timeout=90)
+
+    # Один заход под root: общий размер и остановка окон. Пароль здесь не
+    # кешируется, поэтому каждый лишний вызов — ещё одно окно с паролем.
+    answer = _instance_call("apply-size", str(width), str(height), timeout=300) or {}
+    stopped = [int(number) for number in answer.get("stopped", [])]
+
+    if stage is not None:
+        stage(tr("Перезапускаем основное окно…"))
+    restart_session()
+
+    if stopped:
+        if stage is not None:
+            stage(tr("Поднимаем окна заново…"))
+        _instance_call("start-many", *(str(n) for n in stopped), timeout=600)
+        for number in stopped:
+            wait_instance_ip(number)
+
+    # Запоминаем только то, что действительно применилось: сохрани мы
+    # выбор заранее, Merci помнила бы размер, которого нет ни в одном
+    # окне, и восстанавливала бы его при каждом старте.
+    from .settings import Settings
+
+    Settings().window_size = (width, height)
+
+
+def _apply_size_inside(ip: str, width: int, height: int) -> None:
+    """Свойства и сброс «override» внутри одного поднявшегося контейнера."""
+    density = max(120, min(320, round(180 * height / 1080)))
+    with suppress(WaydroidError):
+        instance_adb(ip, ["shell", f"setprop persist.waydroid.width {width}"], timeout=60)
+        instance_adb(ip, ["shell", f"setprop persist.waydroid.height {height}"], timeout=60)
+        instance_adb(ip, ["shell", f"setprop persist.waydroid.lcd_density {density}"], timeout=60)
+        # Прежний wm size переживает перезапуск и спорит с новым размером.
+        instance_adb(ip, ["shell", "wm size reset"], timeout=60)
+        instance_adb(ip, ["shell", "wm density reset"], timeout=60)
+
+
+def fit_display(number: int, ip: str, width: int, height: int) -> None:
+    """Задаёт окну размер и перезапускает его контейнер.
+
+    Менять размер на лету не выходит, и это проверено: `wm size` меняет
+    дисплей, но поверхность, которую Waydroid отдал композитору, остаётся
+    прежней — картинка съезжает, обрезается или исчезает вовсе. Размер
+    берётся при старте сессии, поэтому единственный честный путь —
+    записать его в свойства контейнера и поднять контейнер заново.
+    Перезапускается только он один: остальные окна не трогаем.
+    """
+    if width < 320 or height < 240:
+        raise WaydroidError(tr("окно слишком мало для подгонки"))
+    density = max(120, min(320, round(180 * height / 1080)))
+
+    instance_adb(ip, ["shell", f"setprop persist.waydroid.width {width}"], timeout=60)
+    instance_adb(ip, ["shell", f"setprop persist.waydroid.height {height}"], timeout=60)
+    instance_adb(ip, ["shell", f"setprop persist.waydroid.lcd_density {density}"], timeout=60)
+
+    if number == 1:
+        # У основного окна свойства живут в настройках самого Waydroid.
+        _run(["waydroid", "prop", "set", "persist.waydroid.width", str(width)], timeout=90)
+        _run(["waydroid", "prop", "set", "persist.waydroid.height", str(height)], timeout=90)
+        restart_session()
+        return
+
+    stop_instance(number)
+    start_instance(number)
+    fresh = wait_instance_ip(number)
+    if not fresh:
+        return
+    wait_instance_ready(fresh)
+    # «Override» от прежних попыток переживает перезапуск и спорит с новым
+    # размером: физический дисплей один, логический другой — и картинка
+    # снова разъезжается. Сбрасываем уже на поднявшемся контейнере: до
+    # перезапуска сброс не удерживается.
+    instance_adb(fresh, ["shell", "wm size reset"], timeout=60)
+    instance_adb(fresh, ["shell", "wm density reset"], timeout=60)
+
+
+def system_ready(ip: str, timeout: int = 20) -> bool:
+    """Отвечает ли Android внутри, а не только загрузился ли он.
+
+    `sys.boot_completed` бывает единицей, когда system_server уже упал:
+    сторож Android убивает его при зависании и запускает заново, и в этом
+    промежутке любая команда отвечает «Can't find service: package».
+    Спрашиваем саму службу пакетов — она и нужна для установки и запуска.
+    """
+    if not ip:
+        return False
+    result = instance_adb(ip, ["shell", "cmd package path android"], timeout=timeout)
+    return "package:" in result.stdout
+
+
+def wait_system_ready(ip: str, seconds: int = 90) -> bool:
+    """Ждёт, пока Android внутри придёт в себя."""
+    deadline = time.time() + seconds
+    while True:
+        if system_ready(ip):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(5)
+
+
+def screen_state(package: str = "", ip: str | None = None) -> str:
+    """Что сейчас с картинкой Android: "есть", "нет" или "затор".
+
+    Проверка отдельная от служб, и вот почему. Окно Waydroid можно закрыть
+    средствами композитора — в Hyprland это Win+Q. Android при этом не
+    закрывается: приложение продолжает работать, но поверхности, на
+    которой оно рисовало, больше нет. После нескольких таких закрытий
+    SurfaceFlinger перестаёт отвечать вовсе, и нового окна не появится уже
+    никогда. Снаружи всё выглядит исправным: службы окон и пакетов на
+    вопрос «найдены?» отвечают «да», `waydroid app launch` возвращает ноль,
+    Merci рапортует об успехе — а экрана нет.
+
+    Поэтому спрашиваем сам SurfaceFlinger: живой отвечает списком слоёв за
+    доли секунды, застрявший не отвечает совсем. Заодно по этому списку
+    видно, есть ли на экране окно нужного приложения.
+    """
+    # Пустая строка и «не указано» — разные вещи: у выключенного окна
+    # адреса нет, и подставлять вместо него основной контейнер нельзя —
+    # так выключенное окно отвечало «картинка есть».
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        return "нет"
+    result = instance_adb(
+        ip, ["shell", "dumpsys", "-t", "3", "SurfaceFlinger", "--list"], timeout=25
+    )
+    text = result.stdout + result.stderr
+    if "TIMEOUT" in text or not result.stdout.strip():
+        return "затор"
+    if not package:
+        return "есть"
+    # Композитор решает, показывать ли окно, по слоям задачи — тем, что
+    # названы «TID:<номер>#<пакет>/...». Слои вроде ActivityRecord есть и у
+    # приложения, которому окна не досталось: по ним «окно есть» выходило
+    # там, где экран оставался пустым.
+    return (
+        "есть"
+        if any(
+            line.lstrip().startswith("TID:") and package in line
+            for line in result.stdout.splitlines()
+        )
+        else "нет"
+    )
+
+
+def display_ready(ip: str | None = None) -> bool:
+    """Отвечает ли Android за картинку."""
+    return screen_state("", ip) == "есть"
+
+
+def wait_app_on_screen(package: str, seconds: int = 45, ip: str | None = None) -> bool:
+    """Ждёт окно приложения, но не дольше, чем есть смысл ждать.
+
+    В заторе ждать нечего: SurfaceFlinger не ответит и через час, поэтому
+    возвращаемся сразу, а не выжидаем срок до конца.
+    """
+    deadline = time.time() + seconds
+    while True:
+        state = screen_state(package, ip)
+        if state == "есть":
+            return True
+        if state == "затор":
+            return False
+        if time.time() >= deadline:
+            return False
+        time.sleep(2)
+
+
+def package_ready(package: str, ip: str = "") -> bool:
+    """Видит ли Android именно это приложение.
+
+    Служба пакетов отвечает раньше, чем дочитывает установленные: сразу
+    после перезапуска контейнера `am start` на живой системе отвечает
+    «Activity class does not exist», хотя приложение никуда не девалось.
+    """
+    ip = ip or container_ip()
+    if not ip:
+        return False
+    result = instance_adb(ip, ["shell", "cmd", "package", "path", package], timeout=20)
+    return "package:" in result.stdout
+
+
+def wait_package_ready(package: str, seconds: int = 60, ip: str = "") -> bool:
+    deadline = time.time() + seconds
+    while True:
+        if package_ready(package, ip):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(2)
+
+
+def instance_ready(ip: str) -> bool:
+    if not ip:
+        return False
+    result = instance_adb(ip, ["shell", "getprop", "sys.boot_completed"], timeout=60)
+    return result.stdout.strip() == "1"
+
+
+def wait_instance_ready(ip: str, seconds: int = 180) -> bool:
+    deadline = time.time() + seconds
+    while True:
+        if instance_ready(ip):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(5)
+
+
+def instance_has_package(ip: str, package: str) -> bool:
+    result = instance_adb(ip, ["shell", "pm", "path", package], timeout=60)
+    return "package:" in result.stdout
+
+
+def install_in_instance(entry: Entry, ip: str) -> None:
+    """Ставит APK в отдельный контейнер.
+
+    Здесь без вариантов нужен полноценный install: контейнеры не делят
+    установленные приложения, install-existing работает только между
+    профилями одного Android.
+    """
+    if not os.path.exists(entry.apk_path):
+        raise WaydroidError(tr("файл APK не найден"))
+    result = instance_adb(ip, ["install", "-r", "-g", entry.apk_path], timeout=900)
+    text = (result.stdout + result.stderr).strip()
+    if "Success" not in text:
+        _raise_install_error(text)
+
+
+# Значение waydroid.active_apps, при котором контейнер спокойно живёт без
+# единого окна. Именно так стоят здоровые контейнеры в покое.
+#
+# Не «Waydroid»: полный интерфейс Android этой сборке композитора показать
+# нечем — лаунчер у неё в чёрном списке (waydroid.blacklist_apps), окна не
+# будет, а контейнер при этом считает, что экран у него есть. Дальше он
+# задыхается без кадровых сигналов: dequeueBuffer отваливается по таймауту,
+# виснет WindowManager, сторож убивает system_server по кругу.
+IDLE_SCREEN = "none"
+
+
+def set_active_app(ip: str, value: str) -> None:
+    instance_adb(ip, ["shell", "setprop", "waydroid.active_apps", value], timeout=60)
+
+
+def launch_in_instance(entry: Entry, ip: str, stage=None) -> None:
+    """Открывает приложение в контейнере: своё окно, свои данные.
+
+    Порядок здесь важнее, чем кажется. В однооконном режиме композитор
+    Waydroid показывает ровно то приложение, которое названо в
+    ``waydroid.active_apps``. Если названного приложения на экране нет, он
+    не показывает НИЧЕГО — закрывает окно совсем:
+
+        single-window: NO TID layer among 4 layers (window stays closed)
+
+    А без окна композитор хоста не шлёт кадровых сигналов, и Android
+    внутри задыхается: `dequeueBuffer failed, error = -110`, следом
+    блокируется WindowManager, и сторож убивает system_server по кругу.
+    Окно после этого не вылечить ничем, кроме перезапуска контейнера, —
+    свойство композитор перечитывает только на кадре, а кадров уже нет.
+
+    Поэтому: сначала поднимаем приложение, и лишь потом отдаём ему экран.
+    А если окно так и не появилось — возвращаем контейнеру полный
+    интерфейс, чтобы он остался живым и годным для следующей попытки.
+    """
+    if not entry.activity:
+        raise WaydroidError(tr("в APK не нашлось activity для запуска"))
+    if not wait_system_ready(ip):
+        raise ContainerUnreachable(
+            tr("Android внутри не отвечает — помогает полный перезапуск контейнера")
+        )
+
+    def say(text: str) -> None:
+        if stage is not None:
+            stage(text)
+
+    wait_package_ready(entry.package, 60, ip)
+    grant_storage_access(entry.package, 0, ip)
+    clear_stale_task(entry.package, ip)
+    start_activity(entry.package, f"{entry.package}/{entry.activity}", 0, ip)
+
+    # Экран отдаём приложению, когда оно уже рисует, — не раньше.
+    say(tr("Ждём первый кадр приложения…"))
+    wait_app_drawing(entry.package, 180, ip)
+    set_active_app(ip, entry.package)
+
+    # И сразу спрашиваем композитор, будет ли окно: отказ значит, что
+    # задача помечена закрытой и нужна новая.
+    time.sleep(4)
+    if composer_refuses_window(ip) is True:
+        instance_adb(ip, ["shell", "am", "force-stop", entry.package], timeout=90)
+        time.sleep(2)
+        start_activity(entry.package, f"{entry.package}/{entry.activity}", 0, ip)
+        wait_app_drawing(entry.package, 180, ip)
+        set_active_app(ip, entry.package)
+
+    # У каждого окна свой SurfaceFlinger, и заклинить его может так же:
+    # закрыли окно средствами композитора — приложение работает, картинки
+    # нет. Запуск при этом отвечает успехом, поэтому проверяем экран.
+    if not wait_app_on_screen(entry.package, 60, ip):
+        with suppress(WaydroidError):
+            set_active_app(ip, IDLE_SCREEN)
+        raise PictureStuck(
+            tr("приложение запустилось, но картинки в этом окне нет")
+        )
+
+
+def app_frames(package: str, ip: str | None = None) -> int:
+    """Сколько кадров приложение уже нарисовало. -1 — не знаем."""
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        return -1
+    result = instance_adb(ip, ["shell", "dumpsys", "gfxinfo", package], timeout=25)
+    for line in result.stdout.splitlines():
+        if "Total frames rendered" in line:
+            with suppress(ValueError):
+                return int(line.split(":", 1)[1].strip())
+    return -1
+
+
+# Свойства, которыми окно должно быть похоже на основное. Основное
+# настраивает под себя сессия Waydroid и сама Merci, а дополнительные
+# поднимаются напрямую и берут только общий файл свойств — из-за этого,
+# например, частота обновления у них оказывалась 180 Гц против 60.
+INHERITED_PROPS = (
+    "persist.waydroid.refresh_rate",
+    "persist.waydroid.multi_windows",
+    "persist.waydroid.adb",
+)
+
+
+def inherit_main_props(ip: str) -> list[str]:
+    """Переносит в окно настройки основного контейнера.
+
+    Возвращает список свойств, которые пришлось менять: если он не пуст,
+    окно нужно перезапустить — эти свойства читаются при старте.
+    """
+    main = container_ip()
+    if not main or not ip or ip == main:
+        return []
+    менялись = []
+    for name in INHERITED_PROPS:
+        нужно = instance_adb(main, ["shell", "getprop", name], timeout=20).stdout.strip()
+        если_есть = instance_adb(ip, ["shell", "getprop", name], timeout=20).stdout.strip()
+        if not нужно or нужно == если_есть:
+            continue
+        instance_adb(ip, ["shell", "setprop", name, нужно], timeout=20)
+        менялись.append(f"{name}={нужно}")
+    return менялись
+
+
+def app_has_surface(package: str, ip: str | None = None) -> bool:
+    """Есть ли у приложения поверхность с кадрами.
+
+    SurfaceFlinger называет такой слой «…(BLAST)» — он появляется, когда у
+    приложения заработала очередь буферов, то есть оно и правда рисует.
+    Признак виден для любого профиля, в отличие от счётчика кадров:
+    `dumpsys gfxinfo` про приложение из второго профиля не знает ничего.
+    """
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        return False
+    result = instance_adb(
+        ip, ["shell", "dumpsys", "-t", "3", "SurfaceFlinger", "--list"], timeout=25
+    )
+    if "TIMEOUT" in (result.stdout + result.stderr):
+        return False
+    return any(
+        package in line and "BLAST" in line for line in result.stdout.splitlines()
+    )
+
+
+def wait_app_drawing(package: str, seconds: int = 120, ip: str | None = None) -> bool:
+    """Ждёт, пока приложение нарисует первый кадр.
+
+    Экран отдавать раньше нельзя. Пока контейнеру велено показывать
+    приложение, а показывать нечего, окна нет — а без окна композитор хоста
+    не шлёт кадровых сигналов, и Android внутри задыхается: сначала
+    `dequeueBuffer failed, error = -110` у строки состояния, потом виснет
+    WindowManager, потом сторож убивает system_server по кругу. У быстрых
+    приложений это незаметно, а тяжёлая игра при первом запуске готовится
+    минуту и больше — и контейнер до неё не доживает.
+
+    Пока ждём, контейнер стоит в покое: без окна, но и без вреда.
+    """
+    deadline = time.time() + seconds
+    while True:
+        if app_has_surface(package, ip) or app_frames(package, ip) > 0:
+            return True
+        if screen_state("", ip) == "затор":
+            return False
+        if time.time() >= deadline:
+            # Приложение может рисовать в обход обычного пути — тогда
+            # кадров мы не увидим никогда. Судим по слоям задачи.
+            return screen_state(package, ip) == "есть"
+        time.sleep(3)
+
+
+def composer_refuses_window(ip: str | None = None) -> bool | None:
+    """Решил ли композитор, что окна не будет.
+
+    Он объявляет это сам, в журнале контейнера:
+
+        single-window: target tid='1000012' aid='com.roblox.client' should_show=1
+        single-window: tid 1000009 (com.roblox.client) in ignored_apps -> no window
+        single-window: NO TID layer among 4 layers (window stays closed)
+
+    Ответ приходит за секунды — а ждать окна вслепую нельзя дольше минуты:
+    ровно столько нужно Android, чтобы задохнуться без кадровых сигналов и
+    попасть под сторожа. True — окна не будет, False — будет, None —
+    композитор промолчал.
+    """
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        return None
+    result = instance_adb(ip, ["logcat", "-d", "-t", "150"], timeout=25)
+    for line in reversed(result.stdout.splitlines()):
+        if "single-window:" not in line:
+            continue
+        if "should_show=1" in line:
+            return False
+        if "no window" in line or "window stays closed" in line:
+            return True
+    return None
+
+
+def app_running(package: str, ip: str | None = None) -> bool:
+    """Работает ли приложение внутри контейнера."""
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        return False
+    result = instance_adb(ip, ["shell", "pidof", package], timeout=20)
+    return bool(result.stdout.strip())
+
+
+def grant_storage_access(package: str, user: int = 0, ip: str | None = None) -> None:
+    """Выдаёт приложению доступ ко всем файлам заранее.
+
+    Иначе Android при первом запуске поднимает поверх игры свой экран
+    «Доступ ко всем файлам» — и всё останавливается: игра стоит за ним и не
+    рисует ни кадра, окна нет, а контейнер задыхается без картинки. В
+    отдельном окне нажать «Разрешить» некому — окна-то и нет.
+
+    Это не обычное разрешение из манифеста (их выдаёт установка ключом
+    `-g`), а особое: у него свой экран и свой список. Поэтому выдаём
+    отдельно и заранее.
+    """
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        return
+    args = ["shell", "appops", "set"]
+    if user:
+        args += ["--user", str(user)]
+    args += ["--uid", package, "MANAGE_EXTERNAL_STORAGE", "allow"]
+    with suppress(WaydroidError):
+        instance_adb(ip, args, timeout=60)
+
+
+def start_activity(package: str, component: str, user: int = 0, ip: str | None = None) -> str:
+    """Запускает приложение и добивается, чтобы оно и правда поднялось.
+
+    Одного `am start` мало. От прошлой жизни приложения остаётся запись
+    задачи, и Android доставляет запуск в неё:
+
+        Warning: Activity not started, intent has been delivered to
+        currently running top-most instance.
+
+    Звучит благополучно, а процесса нет: экземпляр, которому доставили
+    намерение, давно умер, а запись задачи осталась. Бывает и прямее:
+
+        Warning: Activity not started, its current task has been brought
+        to the front
+
+    То есть Android поднял пустую задачу и на этом успокоился. Ни
+    повторный запуск, ни `am force-stop` записи не убирают — приложение в
+    этом окне не откроется уже никогда. Снаружи это «нажимаю запустить, и
+    ничего не происходит».
+
+    Лечится тем, что задачу заводят новую: с флагом «несколько задач»
+    Android создаёт её вместо того, чтобы поднимать старую.
+    """
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        raise WaydroidError(tr("контейнер не запущен"))
+
+    def запустить(новая_задача: bool):
+        args = ["shell", "am", "start"]
+        if новая_задача:
+            args.append("--activity-multiple-task")
+        if user:
+            args += ["--user", str(user)]
+        args += ["-n", component]
+        result = instance_adb(ip, args, timeout=120)
+        return (result.returncode, (result.stdout + result.stderr).strip())
+
+    text = ""
+    for попытка in range(3):
+        code, text = запустить(новая_задача=попытка > 0)
+        if code != 0 or "Error" in text:
+            if попытка == 2:
+                raise WaydroidError(text or tr("запуск не удался"))
+            time.sleep(6)
+            continue
+        for _ in range(6):
+            time.sleep(2)
+            if app_running(package, ip):
+                return text
+        instance_adb(ip, ["shell", "am", "force-stop", package], timeout=90)
+        time.sleep(2)
+    raise WaydroidError(text or tr("запуск не удался"))
+
+
+def clear_stale_task(package: str, ip: str | None = None) -> bool:
+    """Гасит приложение, которое работает, но окна которому уже не дадут.
+
+    Окно Waydroid закрывают средствами композитора — и композитор
+    запоминает эту задачу как закрытую:
+
+        single-window: tid 1000009 (com.roblox.client) in ignored_apps -> no window
+
+    Обычно приложение слышит просьбу закрыться и задачу свою убирает; тогда
+    следующий запуск заводит новую, и окно появляется. Но занятое
+    приложение (игра на загрузке, например) просьбу пропускает, задача
+    остаётся — и запуск в неё окна не даст уже никогда, сколько ни
+    нажимай. Снаружи это ровно то самое «нажимаю запустить, а ничего не
+    открывается».
+
+    Поэтому: работает, а на экране его нет — гасим, чтобы Android завёл
+    новую задачу.
+    """
+    if not app_running(package, ip) or screen_state(package, ip) != "нет":
+        return False
+    if ip is None or ip == container_ip():
+        _adb(["shell", "am", "force-stop", package], timeout=90)
+    else:
+        instance_adb(ip, ["shell", "am", "force-stop", package], timeout=90)
+    time.sleep(2)
+    return True
+
+
+def active_app(ip: str | None = None) -> str:
+    """Что контейнеру велено показывать."""
+    ip = container_ip() if ip is None else ip
+    if not ip:
+        return ""
+    return instance_adb(
+        ip, ["shell", "getprop", "waydroid.active_apps"], timeout=20
+    ).stdout.strip()
+
+
+def guard_idle_screens() -> list[str]:
+    """Возвращает в покой окна, которым велено показывать несуществующее.
+
+    Контейнер живёт без окна только пока ему не велено ничего показывать.
+    Как только он показывает приложение, а окно с экрана исчезает — его
+    закрыли, свернули, увели на другой рабочий стол, — композитор хоста
+    перестаёт слать кадровые сигналы, и Android внутри задыхается:
+    `dequeueBuffer failed, error = -110`, следом виснет WindowManager, и
+    сторож убивает system_server по кругу. Вылечить это потом нечем, кроме
+    перезапуска контейнера.
+
+    Поэтому смотрим вовремя: если показывать велено, а слоёв этого
+    приложения на экране нет — возвращаем контейнер в покой. Сторож даёт на
+    это около минуты, так что заглядывать раз в двадцать секунд достаточно.
+    """
+    вернули = []
+    for item in instances():
+        ip = item.get("ip") or ""
+        if item.get("state") != "RUNNING" or not ip:
+            continue
+        try:
+            показывает = active_app(ip)
+            if not показывает or показывает == IDLE_SCREEN:
+                continue
+            if screen_state(показывает, ip) != "нет":
+                continue  # окно на месте или контейнер уже не отвечает
+            if item.get("number") == 1:
+                _run(
+                    ["waydroid", "prop", "set", "waydroid.active_apps", IDLE_SCREEN],
+                    timeout=60,
+                )
+            else:
+                set_active_app(ip, IDLE_SCREEN)
+            вернули.append(f"{item['number']}:{показывает}")
+        except WaydroidError:
+            continue
+    return вернули
+
+
+def stop_main_app(package: str) -> None:
+    """Закрывает приложение в основном контейнере и возвращает ему экран.
+
+    Вторая половина обязательна: контейнер, которому велено показывать
+    закрытое приложение, остаётся без единого окна — и задыхается без
+    кадровых сигналов ровно так же, как дополнительные окна.
+    """
+    adb_connect()
+    _adb(["shell", "am", "force-stop", package], timeout=90)
+    with suppress(WaydroidError):
+        _run(["waydroid", "prop", "set", "waydroid.active_apps", IDLE_SCREEN], timeout=90)
+
+
+def stop_in_instance(package: str, ip: str) -> None:
+    """Закрывает приложение в окне и возвращает контейнеру полный экран.
+
+    Без второй половины контейнер остаётся с указанием показывать
+    закрытое приложение — то есть без единого окна, а это его и убивает.
+    """
+    instance_adb(ip, ["shell", "am", "force-stop", package], timeout=90)
+    with suppress(WaydroidError):
+        set_active_app(ip, IDLE_SCREEN)
+
+
+def get_running_user_instances() -> dict[str, set[int]]:
+    """Возвращает {package: {user_id1, user_id2, ...}} для всех запущенных процессов."""
+    running: dict[str, set[int]] = {}
+    if not adb_available():
+        return running
+    try:
+        adb_connect()
+        res = _adb(["shell", "ps", "-A"], timeout=10)
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 9:
+                user_str = parts[0]
+                pkg = parts[-1]
+                if user_str.startswith("u") and "_" in user_str:
+                    try:
+                        uid_part = user_str[1:].split("_")[0]
+                        user_id = int(uid_part)
+                        running.setdefault(pkg, set()).add(user_id)
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    return running
+
+
+def get_android_users() -> list[tuple[int, str, str]]:
+    """Возвращает список (user_id, name, raw_line) всех пользователей Android."""
+    users: list[tuple[int, str, str]] = []
+    if not adb_available():
+        return [(0, "Owner", "SYSTEM")]
+    try:
+        adb_connect()
+        res = _adb(["shell", "pm", "list", "users"], timeout=15)
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("UserInfo{") and "}" in line:
+                content = line[len("UserInfo{") : line.find("}")]
+                parts = content.split(":")
+                if len(parts) >= 2:
+                    try:
+                        uid = int(parts[0])
+                        name = parts[1]
+                        users.append((uid, name, line))
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    if not any(u[0] == 0 for u in users):
+        users.insert(0, (0, "Owner", "SYSTEM"))
+    return users
+
+
+def android_user_kinds() -> dict[int, str]:
+    """Тип каждого пользователя: 'system', 'full', 'clone', 'managed'.
+
+    Разница здесь не косметическая. Профили (clone, managed) принадлежат
+    пользователю 0 и показываются ВМЕСТЕ с ним — из них и получается
+    несколько окон. Полный пользователь (full) — это отдельный сеанс
+    Android: когда контейнер переключается на него, всё остальное уходит с
+    экрана. Держать такие в списке окон значит обещать невозможное.
+    """
+    kinds: dict[int, str] = {}
+    try:
+        adb_connect()
+        result = _adb(["shell", "dumpsys", "user"], timeout=90)
+    except WaydroidError:
+        return kinds
+
+    pending: int | None = None
+    for line in result.stdout.splitlines():
+        match = _USER_INFO.search(line)
+        if match is not None:
+            pending = int(match.group(1))
+            kinds[pending] = "system" if pending == 0 else "full"
+            continue
+        if pending is not None and "Type:" in line:
+            if CLONE_USER_TYPE in line:
+                kinds[pending] = "clone"
+            elif "usertype.profile.MANAGED" in line:
+                kinds[pending] = "managed"
+            elif "usertype.full.SYSTEM" in line:
+                kinds[pending] = "system"
+            pending = None
+    return kinds
+
+
+def get_app_instances(entry: Entry) -> list[cloner.InstanceInfo]:
+    """Возвращает список всех доступных окон для данного приложения."""
+    instances: list[cloner.InstanceInfo] = []
+    running_map = get_running_user_instances()
+    running_users = running_map.get(entry.package, set())
+    all_users = get_android_users()
+
+    # Окно 0 — всегда Основное (User 0, оригинальный пакет)
+    instances.append(
+        cloner.InstanceInfo(
+            index=0,
+            user_id=0,
+            package=entry.package,
+            label=tr("Окно 0 (Основное)"),
+            apk_path=entry.apk_path,
+            is_main=True,
+            is_running=(0 in running_users),
+        )
+    )
+
+    # Профили пользователя 0 — и только они. Полный пользователь Android
+    # показать рядом с основным не может: контейнер переключается на него
+    # целиком, и остальные окна пропадают с экрана. Такие профили живут в
+    # строке «Профиль Android», а не здесь.
+    kinds = android_user_kinds()
+    clone_index = 1
+    for uid, name, _info in all_users:
+        if uid == 0 or kinds.get(uid, "full") not in ("clone", "managed"):
+            continue
+        has_pkg = False
+        try:
+            res = _adb(["shell", "pm", "path", "--user", str(uid), entry.package], timeout=10)
+            if "package:" in res.stdout:
+                has_pkg = True
+        except Exception:
+            pass
+
+        if has_pkg:
+            is_running = uid in running_users
+            instances.append(
+                cloner.InstanceInfo(
+                    index=clone_index,
+                    user_id=uid,
+                    package=entry.package,
+                    label=tr("Окно {index} ({name})", index=clone_index, name=name),
+                    apk_path=entry.apk_path,
+                    is_main=False,
+                    is_running=is_running,
+                )
+            )
+            clone_index += 1
+
+    return instances
+
+
+def _mirror_storage_access(package: str, user: int) -> None:
+    """Выдаёт новому окну то же право на файлы, что есть у основного.
+
+    Права в Android раздаются на каждый профиль отдельно, поэтому при
+    первом запуске в новом окне поверх игры открывается экран настроек
+    «Доступ ко всем файлам» — по одному на каждое окно. Если у основного
+    профиля право уже есть, повторять этот разговор незачем.
+    """
+    try:
+        current = _adb(
+            ["shell", "appops", "get", "--user", "0", package,
+             "MANAGE_EXTERNAL_STORAGE"],
+            timeout=30,
+        ).stdout
+        if "allow" not in current:
+            return
+        _adb(
+            ["shell", "appops", "set", "--user", str(user), package,
+             "MANAGE_EXTERNAL_STORAGE", "allow"],
+            timeout=30,
+        )
+    except WaydroidError:
+        # Не вышло — Android просто спросит сам, это не повод падать.
+        pass
+
+
+def create_app_instance(entry: Entry, on_stage=None) -> cloner.InstanceInfo:
+    """Заводит ещё одно окно приложения — профиль при основном пользователе.
+
+    Одновременно на экране могут жить только профили пользователя 0, и
+    Android даёт по одному профилю каждого вида: клон и рабочий. Значит
+    окон больше трёх не бывает: основное, клон и рабочее. Полные
+    пользователи сюда не годятся — переключение на них убирает с экрана
+    всё остальное, поэтому четвёртым окном мы не притворяемся.
+    """
+    apply_multiwindow_optimizations()
+    adb_connect()
+    ensure_user_slots()
+
+    kinds = android_user_kinds()
+    has_clone = any(kind == "clone" for kind in kinds.values())
+    has_managed = any(kind == "managed" for kind in kinds.values())
+
+    if not has_clone:
+        stage_text, argv, label = (
+            tr("Создаём клон-профиль…"),
+            ["--user-type", CLONE_USER_TYPE, "MerciClone"],
+            "MerciClone",
+        )
+    elif not has_managed:
+        stage_text, argv, label = (
+            tr("Создаём рабочий профиль…"),
+            ["--managed", "MerciWork"],
+            "MerciWork",
+        )
+    else:
+        raise WaydroidError(
+            tr("Больше окон Android не даёт: у основного профиля может быть "
+            "только один клон и один рабочий профиль")
+        )
+
+    if on_stage:
+        on_stage(stage_text)
+
+    result = _adb(
+        ["shell", "pm", "create-user", "--profileOf", "0", *argv], timeout=120
+    )
+    text = (result.stdout + result.stderr).strip()
+    match = re.search(r"id (\d+)", text)
+    if match is None:
+        raise WaydroidError(text or tr("не удалось создать окно"))
+    new_uid = int(match.group(1))
+
+    if on_stage:
+        on_stage(tr("Активируем приложение в новом окне…"))
+
+    _adb(["shell", "am", "start-user", str(new_uid)], timeout=120)
+    installed = _adb(
+        [
+            "shell",
+            "cmd",
+            "package",
+            "install-existing",
+            "--user",
+            str(new_uid),
+            entry.package,
+        ],
+        timeout=180,
+    )
+    if "installed for user" not in installed.stdout.lower():
+        _adb(["shell", "pm", "remove-user", str(new_uid)], timeout=120)
+        raise WaydroidError(
+            (installed.stdout + installed.stderr).strip()
+            or tr("не удалось поставить приложение в новое окно")
+        )
+
+    _mirror_storage_access(entry.package, new_uid)
+
+    existing = get_app_instances(entry)
+    found = next((i for i in existing if i.user_id == new_uid), None)
+    if found is not None:
+        return found
+
+    return cloner.InstanceInfo(
+        index=len(existing),
+        user_id=new_uid,
+        package=entry.package,
+        label=tr("Окно {index} ({name})", index=len(existing), name=label),
+        apk_path=entry.apk_path,
+        is_main=False,
+        is_running=False,
+    )
+
+
+def remove_app_instance(entry: Entry, instance_index: int) -> None:
+    """Удаляет окно приложения."""
+    if instance_index <= 0 or not adb_available():
+        return
+    adb_connect()
+    instances = get_app_instances(entry)
+    inst = next((i for i in instances if i.index == instance_index), None)
+    if inst is None or inst.user_id == 0:
+        return
+    try:
+        _adb(["shell", "am", "force-stop", "--user", str(inst.user_id), entry.package], timeout=30)
+        _adb(["shell", "pm", "uninstall", "--user", str(inst.user_id), entry.package], timeout=60)
+    except Exception:
+        pass
+
+
+def clear_app_instance_data(entry: Entry, instance_index: int) -> None:
+    """Сбрасывает данные аккаунта и кеш окна."""
+    adb_connect()
+    instances = get_app_instances(entry)
+    inst = next((i for i in instances if i.index == instance_index), None)
+    if inst is None:
+        return
+    _adb(["shell", "am", "force-stop", "--user", str(inst.user_id), entry.package], timeout=30)
+    _adb(["shell", "pm", "clear", "--user", str(inst.user_id), entry.package], timeout=60)
+
+
+def launch_app_instance(entry: Entry, instance_index: int) -> None:
+    """Запускает конкретное окно приложения в многооконном режиме."""
+    apply_multiwindow_optimizations()
+    adb_connect()
+
+    instances = get_app_instances(entry)
+    inst = next((i for i in instances if i.index == instance_index), None)
+    if inst is None:
+        if instance_index == 0:
+            target_uid = 0
+        else:
+            raise WaydroidError(tr("Окно не найдено"))
+    else:
+        target_uid = inst.user_id
+
+    if not entry.activity:
+        raise WaydroidError(tr("в APK не нашлось activity для запуска"))
+
+    # Окна принадлежат основному профилю и его профилям. Если контейнер
+    # стоит на другом полном пользователе, ни одно из них не покажется:
+    # Android держит на экране только текущего пользователя. Именно из-за
+    # этого «Запустить все» выглядело как «ничего не происходит».
+    if current_android_user() != 0:
+        switch_android_user(0)
+
+    if target_uid != 0:
+        _adb(["shell", "am", "start-user", str(target_uid)], timeout=30)
+        # Право на файлы Android сбрасывает обратно, стоит приложению
+        # перезапуститься, поэтому выдаём его перед каждым запуском, а не
+        # только при создании окна: иначе поверх игры снова открывается
+        # экран «Доступ ко всем файлам».
+        _mirror_storage_access(entry.package, target_uid)
+
+    # Waydroid рисует окна только того приложения, которое названо здесь.
+    # Без этого задача запускается, живёт — и остаётся невидимой.
+    _run(
+        ["waydroid", "prop", "set", "waydroid.active_apps", entry.package],
+        timeout=90,
+    )
+
+    # Запускаем в отдельном окне Wayland с флагами создания новой задачи
+    res = _adb(
+        [
+            "shell",
+            "am",
+            "start",
+            "--user",
+            str(target_uid),
+            "-n",
+            f"{entry.package}/{entry.activity}",
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "-f",
+            "0x18080000",
+            "--windowingMode",
+            "5",
+        ],
+        timeout=120,
+    )
+    text = (res.stdout + res.stderr).strip()
+    if res.returncode != 0 or "Error" in text:
+        raise WaydroidError(text or tr("Запуск окна не удался"))
+
+    policy = "immersive.full=*" if multi_windows_on() else "immersive.status=*"
+    _adb(["shell", "settings", "put", "global", "policy_control", policy], timeout=60)
+
+
+def stop_app_instance(entry: Entry, instance_index: int) -> None:
+    """Останавливает процесс выбранного окна."""
+    if not adb_available():
+        return
+    adb_connect()
+    instances = get_app_instances(entry)
+    inst = next((i for i in instances if i.index == instance_index), None)
+    if inst is None:
+        return
+    _adb(["shell", "am", "force-stop", "--user", str(inst.user_id), entry.package], timeout=30)
+
+
+def launch_all_instances(entry: Entry, on_stage=None) -> None:
+    """Запускает главное окно и все созданные клоны по очереди."""
+    instances = get_app_instances(entry)
+    failures: list[str] = []
+    for inst in instances:
+        if on_stage:
+            on_stage(tr("Запуск {name}…", name=inst.label))
+        try:
+            launch_app_instance(entry, inst.index)
+        except Exception as failure:  # noqa: BLE001 — причина уходит человеку
+            failures.append(f"{inst.label}: {failure}")
+        # Окну нужно время встать: запуск следующего сразу за предыдущим
+        # приводит к тому, что Android сводит их в одну задачу.
+        time.sleep(3)
+
+    # Молчать об отказах нельзя: раньше «Запустить все» при полном провале
+    # выглядело точно так же, как при успехе.
+    if failures and len(failures) == len(instances):
+        raise WaydroidError("; ".join(failures))
+    if failures:
+        raise WaydroidError(
+            tr("Открылись не все окна — {details}", details="; ".join(failures))
+        )
+
+
+def stop_all_instances(entry: Entry) -> None:
+    """Останавливает все окна и клоны данного приложения."""
+    instances = get_app_instances(entry)
+    if adb_available():
+        adb_connect()
+        for inst in instances:
+            try:
+                _adb(["shell", "am", "force-stop", "--user", str(inst.user_id), entry.package], timeout=15)
+            except Exception:
+                pass
+
+
+def apply_multiwindow_optimizations() -> None:
+    """Готовит контейнер к работе рядом с другими окнами.
+
+    Раньше эта функция включала многооконный режим Waydroid — и делала
+    хуже: в нём окно подгоняется под размер задачи, приложение оказывается
+    в углу, а вокруг прозрачная пустота. Теперь режим не трогаем.
+    """
+    # Многооконный режим здесь НЕ включаем. Он нужен, чтобы показать
+    # несколько приложений из ОДНОГО Android, и ценой тому — окно под
+    # размер задачи: приложение сидит в углу, а рядом прозрачная пустота.
+    # У нас же на каждое окно свой контейнер, и в обычном режиме Waydroid
+    # растягивает картинку фиксированного разрешения на всё окно через
+    # wp_viewporter — ровно так, как это делают эмуляторы.
+    if adb_available():
+        try:
+            adb_connect()
+            _adb(
+                [
+                    "shell",
+                    "settings",
+                    "put",
+                    "global",
+                    "force_resizable_activities",
+                    "1",
+                ],
+                timeout=15,
+            )
+            _adb(
+                ["shell", "settings", "put", "global", "enable_freeform_support", "1"],
+                timeout=15,
+            )
+            _adb(
+                ["shell", "setprop", "persist.sys.debug.multi_window", "1"], timeout=15
+            )
+        except Exception:
+            pass
+
+
+def apply_eco_mode(enabled: bool) -> None:
+    """Режим экономии: отключает тяжелые системные анимации Android."""
+    if not adb_available():
+        return
+    try:
+        adb_connect()
+        val = "0" if enabled else "1"
+        _adb(
+            ["shell", "settings", "put", "global", "window_animation_scale", val],
+            timeout=15,
+        )
+        _adb(
+            ["shell", "settings", "put", "global", "transition_animation_scale", val],
+            timeout=15,
+        )
+        _adb(
+            ["shell", "settings", "put", "global", "animator_duration_scale", val],
+            timeout=15,
+        )
+    except Exception:
+        pass
+
+
+def set_fps_limit(fps: int) -> None:
+    """Ограничение частоты кадров (FPS) в Android для экономии ресурсов."""
+    if not adb_available():
+        return
+    try:
+        adb_connect()
+        if fps > 0:
+            _adb(
+                ["shell", "settings", "put", "system", "min_refresh_rate", str(fps)],
+                timeout=15,
+            )
+            _adb(
+                ["shell", "settings", "put", "system", "peak_refresh_rate", str(fps)],
+                timeout=15,
+            )
+            _adb(["shell", "setprop", "debug.sf.fps", str(fps)], timeout=15)
+        else:
+            _adb(
+                ["shell", "settings", "delete", "system", "min_refresh_rate"],
+                timeout=15,
+            )
+            _adb(
+                ["shell", "settings", "delete", "system", "peak_refresh_rate"],
+                timeout=15,
+            )
+            _adb(["shell", "setprop", "debug.sf.fps", "0"], timeout=15)
+    except Exception:
+        pass
+
+
+def trim_android_memory() -> None:
+    """Освобождает неактивную память Android и кэш."""
+    if not adb_available():
+        return
+    adb_connect()
+    _adb(["shell", "am", "kill-all"], timeout=30)
+    _adb(["shell", "am", "trim-memory", "0", "COMPLETE"], timeout=30)
+
+
+def create_clone(entry: Entry) -> int:
+    """Совместимость: создаёт новый клон приложения."""
+    inst = create_app_instance(entry)
+    return inst.index
+
+
+def remove_clone(package: str) -> None:
+    """Совместимость: удаляет клон приложения."""
+    if adb_available():
+        adb_connect()
+        _adb(["shell", "pm", "uninstall", package], timeout=120)
+
+
+def launch_clone(entry: Entry) -> None:
+    """Совместимость: открывает клон."""
+    instances = get_app_instances(entry)
+    clones = [i for i in instances if not i.is_main]
+    if clones:
+        launch_app_instance(entry, clones[0].index)
+    else:
+        create_app_instance(entry)
+        launch_app_instance(entry, 1)
 
 
 def set_browser_role(user: int | None = None) -> None:
@@ -2164,6 +4014,24 @@ def uninstall_for_user(package: str, user: int) -> None:
         raise WaydroidError(text or "удалить не удалось")
 
 
+def _free_running_users(keep: int) -> None:
+    """Останавливает работающие профили, кроме основного и нужного.
+
+    Профиль в фоне занимает место в лимите одновременно запущенных, а
+    пользы от него нет: показать его вместе с текущим Android всё равно
+    не может.
+    """
+    result = _adb(["shell", "pm", "list", "users"], timeout=60)
+    for line in result.stdout.splitlines():
+        match = re.search(r"UserInfo\{(\d+):[^}]*\}\s+running", line)
+        if match is None:
+            continue
+        number = int(match.group(1))
+        if number in (0, keep):
+            continue
+        _adb(["shell", "am", "stop-user", "-f", str(number)], timeout=120)
+
+
 def switch_android_user(user: int) -> None:
     """Переводит контейнер на этого пользователя.
 
@@ -2175,10 +4043,17 @@ def switch_android_user(user: int) -> None:
     if current_android_user() == user:
         return
     result = _adb(["shell", "am", "switch-user", str(user)], timeout=120)
-    if result.returncode != 0:
-        raise WaydroidError(
-            (result.stderr or result.stdout).strip() or "переключиться не удалось"
-        )
+    text = (result.stdout + result.stderr).strip()
+    if result.returncode != 0 or "Failed to switch" in text:
+        # Android держит одновременно лишь несколько профилей (обычно три,
+        # считая основной). Когда мест нет, переключение отвечает «Failed to
+        # switch to user N» — и выглядит это как поломка на ровном месте.
+        # Освобождаем места, останавливая чужие профили, и пробуем ещё раз.
+        _free_running_users(keep=user)
+        result = _adb(["shell", "am", "switch-user", str(user)], timeout=120)
+        text = (result.stdout + result.stderr).strip()
+    if result.returncode != 0 or "Failed to switch" in text:
+        raise WaydroidError(text or tr("переключиться не удалось"))
     # Переключение не мгновенное: пока идёт, pm и am отвечают на старого
     # пользователя, и приложение открылось бы не в том профиле.
     for _ in range(30):
@@ -2188,7 +4063,7 @@ def switch_android_user(user: int) -> None:
     raise WaydroidError(tr("контейнер не переключился на этого пользователя"))
 
 
-def launch_for_user(entry: Entry, user: int) -> None:
+def launch_for_user(entry: Entry, user: int, stage=None) -> None:
     """Открывает приложение в профиле — так, чтобы окно и правда появилось.
 
     Мало запустить activity. Waydroid по умолчанию работает в однооконном
@@ -2206,17 +4081,45 @@ def launch_for_user(entry: Entry, user: int) -> None:
     if not entry.activity:
         raise WaydroidError(tr("в APK не нашлось activity для запуска"))
 
-    # Свойство ставим через waydroid: оно системное, и из adb-оболочки его
-    # менять не разрешено — служба контейнера делает это от имени system.
-    _run(["waydroid", "prop", "set", "waydroid.active_apps", entry.package], timeout=90)
+    def say(text: str) -> None:
+        if stage is not None:
+            stage(text)
+
+    # Android мог загрузиться и тут же остаться без system_server: сторож
+    # убивает его при зависании и поднимает заново. В этом промежутке любая
+    # команда отвечает «Can't find service: package». А живой system_server
+    # ещё не значит, что будет окно: картинку рисует SurfaceFlinger, и его
+    # заклинивает от закрытия окна средствами композитора. Проверяем и то,
+    # и другое — и, если надо, возвращаем контейнер в чувство.
+    ensure_container_alive(stage)
+    if not wait_system_ready(container_ip()):
+        raise ContainerUnreachable(
+            tr("Android внутри не отвечает — помогает полный перезапуск контейнера")
+        )
+
+
+    # Контейнер мог перезапуститься прямо сейчас — проверкой выше — и
+    # вернуться в основной профиль. Запуск в непереключённом профиле уходит
+    # в фон: приложение работает, окна нет.
+    if user and current_android_user() != user:
+        say(tr("Переключаем профиль…"))
+        switch_android_user(user)
 
     component = f"{entry.package}/{entry.activity}"
-    result = _adb(
-        ["shell", "am", "start", "--user", str(user), "-n", component], timeout=120
-    )
-    text = (result.stdout + result.stderr).strip()
-    if result.returncode != 0 or "Error" in text:
-        raise WaydroidError(text or "запуск не удался")
+
+    # Приложение может уже работать, но без окна — с задачей, которую
+    # композитор запомнил как закрытую. В неё окна не будет; нужна новая.
+    if clear_stale_task(entry.package):
+        say(tr("Закрываем прежнее окно приложения…"))
+
+    grant_storage_access(entry.package, user)
+
+    # Приложение должно быть не просто установлено, а уже прочитано службой
+    # пакетов — иначе запуск отвечает «Activity class does not exist» о
+    # приложении, которое стоит на месте.
+    wait_package_ready(entry.package)
+
+    start_activity(entry.package, component, user)
 
     policy = (
         "immersive.full=*"
@@ -2225,28 +4128,119 @@ def launch_for_user(entry: Entry, user: int) -> None:
     )
     _adb(["shell", "settings", "put", "global", "policy_control", policy], timeout=60)
 
+    # Экран отдаём приложению, когда оно уже рисует, — и ни секундой раньше.
+    # Свойство ставим через waydroid: оно системное, и из adb-оболочки его
+    # менять не разрешено — служба контейнера делает это от имени system.
+    say(tr("Ждём первый кадр приложения…"))
+    wait_app_drawing(entry.package, 180)
+    _run(["waydroid", "prop", "set", "waydroid.active_apps", entry.package], timeout=90)
 
-def launch_apk(entry: Entry) -> None:
-    """Открывает приложение в контейнере.
+    # Композитор объявляет своё решение сразу. Если он отказался показывать
+    # окно — задача помечена закрытой, и ждать нечего: гасим приложение и
+    # заводим новую, пока Android не задохнулся без картинки.
+    time.sleep(4)
+    if composer_refuses_window() is True:
+        say(tr("Закрываем прежнее окно приложения…"))
+        _adb(["shell", "am", "force-stop", entry.package], timeout=90)
+        time.sleep(2)
+        start_activity(entry.package, component, user)
+        wait_app_drawing(entry.package, 180)
+        _run(
+            ["waydroid", "prop", "set", "waydroid.active_apps", entry.package],
+            timeout=90,
+        )
 
-    С повтором, и не для красоты: сессия могла подняться секунду назад, а
-    Android внутри неё грузится дольше — первая попытка тогда возвращает
-    ошибку, хотя через несколько секунд всё откроется. Один такой отказ
-    выглядел как «не запустилось», причём ровно в тот момент, когда окно
-    приложения уже появлялось на экране.
+    # Запуск отвечает успехом раньше, чем появляется окно, а иногда окна не
+    # появляется вовсе. Ждём его — и, если не дождались, возвращаем картинку
+    # и открываем заново.
+    if wait_app_on_screen(entry.package):
+        return
+    say(tr("Окно не появилось — возвращаем картинку Android…"))
+    # Контейнер, которому велено показывать не рисующее приложение,
+    # остаётся без единого окна и задыхается — возвращаем ему экран до
+    # перезапуска, чтобы следующая попытка началась со здорового.
+    with suppress(WaydroidError):
+        _run(["waydroid", "prop", "set", "waydroid.active_apps", IDLE_SCREEN], timeout=90)
+    restart_session(stage)
+
+    # Перезапуск возвращает контейнер в основной профиль, а приложение живёт
+    # в своём: запуск в непереключённом профиле уходит в фон, и окна снова
+    # не будет — только теперь уже без всякой причины на виду.
+    if user:
+        say(tr("Переключаем профиль…"))
+        switch_android_user(user)
+    say(tr("Открываем…"))
+    wait_package_ready(entry.package)
+    start_activity(entry.package, component, user)
+    wait_app_drawing(entry.package, 180)
+    _run(["waydroid", "prop", "set", "waydroid.active_apps", entry.package], timeout=90)
+    if not wait_app_on_screen(entry.package, 90):
+        with suppress(WaydroidError):
+            _run(["waydroid", "prop", "set", "waydroid.active_apps", IDLE_SCREEN], timeout=90)
+        raise ContainerUnreachable(
+            tr("Waydroid запустил приложение, но окна на экране так и нет")
+        )
+
+
+def launch_apk(entry: Entry, stage=None) -> None:
+    """Открывает приложение в контейнере — и убеждается, что окно появилось.
+
+    Запуск с повтором, и не для красоты: сессия могла подняться секунду
+    назад, а Android внутри неё грузится дольше — первая попытка тогда
+    возвращает ошибку, хотя через несколько секунд всё откроется. Один
+    такой отказ выглядел как «не запустилось», причём ровно в тот момент,
+    когда окно приложения уже появлялось на экране.
+
+    Мало и этого. `waydroid app launch` отвечает успехом, пока жива служба
+    приложений, — а рисует картинку другая, SurfaceFlinger. Если её
+    заклинило (так бывает после закрытия окна средствами композитора),
+    приложение честно запустится и будет работать без единого окна.
+    Поэтому дожидаемся окна на экране, а если его нет — возвращаем картинку
+    перезапуском сессии и пробуем ещё раз.
     """
     if not entry.package:
         raise WaydroidError(tr("неизвестно имя пакета"))
 
-    last = ""
-    for attempt in range(4):
-        if attempt:
-            time.sleep(6)
-        result = _run(["waydroid", "app", "launch", entry.package], timeout=60)
-        if result.returncode == 0:
-            return
-        last = (result.stderr or result.stdout).strip()
-    raise WaydroidError(last or "запуск не удался")
+    # Когда activity известна, открываем своим порядком: `waydroid app
+    # launch` отдаёт экран приложению до того, как оно нарисует первый кадр,
+    # и всё это время контейнер стоит без единого окна. После перезапуска
+    # контейнера приложение стартует холодно и медленно — окна нет долго, и
+    # Android успевает задохнуться без кадровых сигналов.
+    if entry.activity:
+        launch_for_user(entry, 0, stage)
+        return
+
+    def say(text: str) -> None:
+        if stage is not None:
+            stage(text)
+
+    def once() -> None:
+        last = ""
+        for attempt in range(4):
+            if attempt:
+                time.sleep(6)
+            result = _run(["waydroid", "app", "launch", entry.package], timeout=60)
+            if result.returncode == 0:
+                return
+            last = (result.stderr or result.stdout).strip()
+        raise WaydroidError(last or tr("запуск не удался"))
+
+    if screen_state() == "затор":
+        say(tr("Картинка Android застряла — возвращаем…"))
+        restart_session(stage)
+
+    once()
+    if wait_app_on_screen(entry.package):
+        return
+
+    say(tr("Окно не появилось — возвращаем картинку Android…"))
+    restart_session(stage)
+    say(tr("Открываем…"))
+    once()
+    if not wait_app_on_screen(entry.package, 90):
+        raise ContainerUnreachable(
+            tr("Waydroid запустил приложение, но окна на экране так и нет")
+        )
 
 
 _TOMBSTONES = "$HOME/.local/share/waydroid/data/tombstones"
@@ -2306,13 +4300,25 @@ def crash_log_async(callback) -> None:
 
 
 def resolution() -> tuple[int, int]:
-    """Разрешение окна контейнера. (0, 0) — как решит Waydroid."""
+    """Размер окна контейнера — тот, что на самом деле.
+
+    Свойству верить нельзя: оно может остаться от прежней настройки, а
+    дисплей у контейнера будет другой. Показывать в карточке одно, когда
+    на экране другое, — худший из вариантов, поэтому спрашиваем сам
+    контейнер и только при неудаче смотрим на свойство.
+    """
+    ip = container_ip()
+    if ip:
+        actual = display_size(ip)
+        if all(actual):
+            return actual
     try:
-        width = int(_prop("persist.waydroid.width") or 0)
-        height = int(_prop("persist.waydroid.height") or 0)
+        return (
+            int(_prop("persist.waydroid.width") or 0),
+            int(_prop("persist.waydroid.height") or 0),
+        )
     except ValueError:
         return 0, 0
-    return width, height
 
 
 def recommended_render(monitor: tuple[int, int]) -> tuple[int, int]:
@@ -2659,17 +4665,34 @@ def container_restart_step() -> Step:
     """Полный перезапуск контейнера — когда перезапуска сессии не хватило."""
     helper = askpass_helper()
     sudo = f"env SUDO_ASKPASS={_quote(helper)} sudo -A " if helper else "sudo "
+    # Дополнительные окна держат прежнее монтирование образа: пока они
+    # работают, контейнер не поднимется вовсе, а оверлей с транслятором
+    # Waydroid отключит насовсем. Поэтому гасим их первым делом — и молча,
+    # если их нет.
+    stop_extra = "".join(
+        f"{sudo}lxc-stop -P /var/lib/waydroid/lxc -n waydroid{number} -k "
+        ">/dev/null 2>&1 || true; "
+        for number in _registry()
+    )
     script = (
         "set -e; "
         'echo "останавливаем сессию"; '
         "waydroid session stop >/dev/null 2>&1 || true; "
-        "pkill -9 -f 'waydroid session start' || true; "
-        "sleep 2; "
+        "pkill -9 -f '[w]aydroid session start' || true; "
+        + ('echo "гасим дополнительные окна"; ' + stop_extra if stop_extra else "")
+        + "sleep 2; "
         'echo "перезапускаем контейнер"; '
         f"{sudo}systemctl restart waydroid-container.service; "
         "sleep 4; "
+        # Оверлей мог быть отключён прошлой неудачей — возвращаем его,
+        # иначе транслятор ARM не появится и после перезапуска.
+        f"{sudo}sed -i 's/^mount_overlays = False/mount_overlays = True/' "
+        "/var/lib/waydroid/waydroid.cfg || true; "
         'echo "поднимаем сессию"; '
-        "setsid waydroid session start >/dev/null 2>&1 &"
+        # Команду запуска собираем из переменной: если написать её целиком,
+        # строка «waydroid session start» окажется в командной строке самого
+        # скрипта — и pkill выше убьёт его же, на середине работы.
+        'S="session start"; setsid waydroid $S >/dev/null 2>&1 &'
     )
     return Step(
         key="container-restart",
@@ -2766,7 +4789,7 @@ def stop_session_async(callback) -> None:
 
     def work():
         _run(["waydroid", "session", "stop"], timeout=40)
-        _run(["sh", "-c", "pkill -9 -f 'waydroid session start' || true"], timeout=15)
+        _run(["sh", "-c", "pkill -9 -f '[w]aydroid session start' || true"], timeout=15)
         _run(["sh", "-c", "sleep 3"], timeout=10)
         forget_state()
         return status(use_cache=False)

@@ -51,6 +51,11 @@ modules:
       - cp -r data/urlforward/. /app/share/merci/urlforward/
       - chmod +x /app/share/merci/urlforward/build-apk.sh
       - chmod +x /app/share/merci/urlforward/merci-url-listener.py
+      # Помощник для дополнительных контейнеров: заводит свой binder,
+      # свои данные и свой конфиг LXC на каждое окно.
+      - mkdir -p /app/share/merci/instances
+      - cp -r data/instances/. /app/share/merci/instances/
+      - chmod +x /app/share/merci/instances/merci-instance.py
       - install -Dm644 data/xyz.hackerstone.Merci.desktop
         /app/share/applications/xyz.hackerstone.Merci.desktop
       - install -Dm644 data/xyz.hackerstone.Merci.metainfo.xml

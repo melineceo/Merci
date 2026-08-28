@@ -8,7 +8,7 @@
 
 **Android apps on Linux — drop in an APK and launch it.**
 
-[![version](https://img.shields.io/badge/version-0.1.1-7c5cff)](https://github.com/melineceo/Merci/releases)
+[![version](https://img.shields.io/badge/version-0.1.2-7c5cff)](https://github.com/melineceo/Merci/releases)
 [![beta](https://img.shields.io/badge/status-beta-ffb02e)](#-this-is-a-beta)
 [![changelog](https://img.shields.io/badge/changelog-CHANGELOG-8a8f98)](CHANGELOG.en.md)
 [![license](https://img.shields.io/badge/license-MIT-3aa675)](LICENSE)
@@ -126,6 +126,11 @@ container and the kernel module live on the host.
   Merci explains that and offers to replace the installation with one click.
 - **Android profiles (MultiUser)** — separate data for one app: a second
   account without logging out of the first.
+- **Several windows of one app** — each window is a separate Android
+  container: its own data, its own binder, its own network address and its own
+  window on screen. Every one of them is hardware accelerated: they all talk to
+  the same venus server. There is one honest limit — memory, roughly a gigabyte
+  per empty container plus the app itself.
 - **A tray icon** with container controls, and the window hides itself once the
   game starts.
 - **Two interface languages** — Russian and English. The choice is saved in the
@@ -715,7 +720,7 @@ bash scripts/publish.sh
 # 3. put the repository on GitHub Pages
 bash scripts/publish-pages.sh
 # 4. tag the release
-git tag v0.1.1 && git push origin v0.1.1
+git tag v0.1.2 && git push origin v0.1.2
 ```
 
 The tag step starts the [workflow](.github/workflows/publish.yml): it builds the

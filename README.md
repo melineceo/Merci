@@ -8,7 +8,7 @@
 
 **Android-приложения в Linux — перетащил APK и запустил.**
 
-[![версия](https://img.shields.io/badge/версия-0.1.1-7c5cff)](https://github.com/melineceo/Merci/releases)
+[![версия](https://img.shields.io/badge/версия-0.1.2-7c5cff)](https://github.com/melineceo/Merci/releases)
 [![beta](https://img.shields.io/badge/статус-beta-ffb02e)](#-это-beta)
 [![изменения](https://img.shields.io/badge/что_менялось-CHANGELOG-8a8f98)](CHANGELOG.md)
 [![лицензия](https://img.shields.io/badge/лицензия-MIT-3aa675)](LICENSE)
@@ -123,6 +123,11 @@ flatpak install --user ./Merci.flatpak
   заменить установку одним нажатием.
 - **Профили Android (MultiUser)** — отдельные данные одного приложения:
   второй аккаунт без выхода из первого.
+- **Несколько окон одного приложения** — каждое окно это отдельный
+  контейнер Android: свои данные, свой binder, свой адрес в сети и своё
+  окно на экране. Ускорение достаётся каждому — все контейнеры ходят в
+  один сервер venus. Предел один, и он честный: память, примерно гигабайт
+  на пустой контейнер плюс само приложение.
 - **Значок в трее** с меню контейнера, и окно само уходит в трей, когда игра
   запустилась.
 - **Два языка интерфейса** — русский и английский. Выбор в настройках
@@ -704,7 +709,7 @@ bash scripts/publish.sh
 # 3. выложить репозиторий на GitHub Pages
 bash scripts/publish-pages.sh
 # 4. пометить выпуск
-git tag v0.1.1 && git push origin v0.1.1
+git tag v0.1.2 && git push origin v0.1.2
 ```
 
 Шаг с тегом запускает [рабочий процесс](.github/workflows/publish.yml): он

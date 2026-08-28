@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import suppress
 
 import gi
 
@@ -12,7 +13,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-from . import apk, hostexec, waydroid  # noqa: E402
+from . import apk, cloner, hostexec, waydroid  # noqa: E402
 from .settings import Settings  # noqa: E402
 from .i18n import LANGUAGES, set_language, tr  # noqa: E402
 from .tray import MenuItem, TrayIcon  # noqa: E402
@@ -143,6 +144,13 @@ class MerciWindow(Adw.ApplicationWindow):
         # фоновых запросов ещё в пути. Трогать виджеты уничтоженного окна
         # нельзя — GTK на этом ругается, а то и падает.
         self._closing = False
+        self._guard_busy = False
+
+        # Присмотр за окнами: контейнер, которому велено показывать
+        # исчезнувшее с экрана приложение, задыхается за минуту с небольшим —
+        # и лечится потом только перезапуском. Возвращаем такие в покой, пока
+        # они живы. Раз в двадцать секунд, и только когда есть что смотреть.
+        GLib.timeout_add_seconds(20, self._guard_screens)
 
         self.tray = self._build_tray()
         # Со значком в трее крестик логично прячет окно, а не закрывает
@@ -411,6 +419,82 @@ class MerciWindow(Adw.ApplicationWindow):
         self._syncing_profile = False
         runtime.add(self.profile_row)
 
+        # --- Мультиокна / Клоны (Multi-Instance) как в LDPlayer ---
+        self.instances_group = Adw.PreferencesGroup(title=tr("Окна"))
+        self._instance_rows: list[Adw.ActionRow] = []
+
+        instances_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.btn_add_instance = Gtk.Button(label=tr("+ Окно"))
+        self.btn_add_instance.set_tooltip_text(tr("Создать новое независимое окно этого приложения"))
+        self.btn_add_instance.add_css_class("flat")
+        self.btn_add_instance.connect("clicked", lambda *_: self._create_new_instance())
+
+        self.btn_launch_all = Gtk.Button(label=tr("▶ Запустить все"))
+        self.btn_launch_all.set_tooltip_text(tr("Открыть все окна одновременно"))
+        self.btn_launch_all.add_css_class("flat")
+        self.btn_launch_all.connect("clicked", lambda *_: self._launch_all_instances())
+
+        self.btn_stop_all = Gtk.Button(label=tr("⏹ Остановить все"))
+        self.btn_stop_all.set_tooltip_text(tr("Остановить все окна этого приложения"))
+        self.btn_stop_all.add_css_class("flat")
+        self.btn_stop_all.connect("clicked", lambda *_: self._stop_all_instances())
+
+        instances_header.append(self.btn_add_instance)
+        instances_header.append(self.btn_launch_all)
+        instances_header.append(self.btn_stop_all)
+        self.instances_group.set_header_suffix(instances_header)
+
+        # --- Оптимизация и производительность ---
+        self.opt_group = Adw.PreferencesGroup(title=tr("Оптимизация и производительность"))
+
+        self.eco_row = Adw.SwitchRow(
+            title=tr("Режим экономии (Eco Mode)"),
+            subtitle=tr("отключает анимации Android и снижает нагрузку на процессор и видеокарту"),
+        )
+        self.eco_row.set_active(self.settings.eco_mode)
+        self.eco_row.connect("notify::active", self._on_eco_mode_toggled)
+        self.opt_group.add(self.eco_row)
+
+        self.fps_row = Adw.ComboRow(
+            title=tr("Ограничение FPS"),
+            subtitle=tr("лимит кадров в секунду для экономии ресурсов при мультибоксинге"),
+        )
+        self._fps_values = [0, 15, 30, 45, 60]
+        fps_labels = [
+            tr("Без ограничений (Макс. FPS)"),
+            tr("15 FPS (Макс. экономия)"),
+            tr("30 FPS (Рекомендуется для окон)"),
+            tr("45 FPS"),
+            tr("60 FPS"),
+        ]
+        fps_model = Gtk.StringList.new(fps_labels)
+        self.fps_row.set_model(fps_model)
+        cur_fps = self.settings.fps_limit
+        cur_idx = self._fps_values.index(cur_fps) if cur_fps in self._fps_values else 0
+        self.fps_row.set_selected(cur_idx)
+        self.fps_row.connect("notify::selected", self._on_fps_changed)
+        self.opt_group.add(self.fps_row)
+
+        self.freeform_row = Adw.ActionRow(
+            title=tr("Свободный многооконный режим"),
+            subtitle=tr("принудительно разрешает всем играм и окнам открываться рядом"),
+        )
+        btn_apply_ff = Gtk.Button(label=tr("Применить"), valign=Gtk.Align.CENTER)
+        btn_apply_ff.add_css_class("flat")
+        btn_apply_ff.connect("clicked", lambda *_: self._apply_freeform_opt())
+        self.freeform_row.add_suffix(btn_apply_ff)
+        self.opt_group.add(self.freeform_row)
+
+        self.ram_trim_row = Adw.ActionRow(
+            title=tr("Очистить память Android (RAM Trim)"),
+            subtitle=tr("освобождает неактивную оперативную память и сбрасывает кэш"),
+        )
+        btn_trim = Gtk.Button(label=tr("Очистить"), valign=Gtk.Align.CENTER)
+        btn_trim.add_css_class("flat")
+        btn_trim.connect("clicked", lambda *_: self._trim_ram())
+        self.ram_trim_row.add_suffix(btn_trim)
+        self.opt_group.add(self.ram_trim_row)
+
         self.build_row = Adw.ActionRow(title=tr("Сборка в контейнере"))
         self.build_row.add_prefix(Gtk.Image.new_from_icon_name("package-x-generic-symbolic"))
         runtime.add(self.build_row)
@@ -497,6 +581,8 @@ class MerciWindow(Adw.ApplicationWindow):
         column.append(hero)
         column.append(self.banner)
         column.append(self.info_group)
+        column.append(self.instances_group)
+        column.append(self.opt_group)
         column.append(runtime)
         column.append(actions)
 
@@ -535,6 +621,9 @@ class MerciWindow(Adw.ApplicationWindow):
         self._show_detail(row.entry)
 
     def _show_detail(self, entry: Entry) -> None:
+        # Новое приложение — новая серия попыток.
+        self._state_retries = 0
+        self._state_retry_pending = False
         self.content_stack.set_visible_child_name("detail")
         self.content_title.set_title(entry.name)
         self.content_title.set_subtitle(entry.package)
@@ -587,13 +676,20 @@ class MerciWindow(Adw.ApplicationWindow):
         return geometry.width * scale, geometry.height * scale
 
     def _fill_monitor_size(self) -> None:
+        """Ставит размер монитора и сразу применяет его.
+
+        Раньше размер только подставлялся в поле с советом «нажмите
+        галочку» — а её там не было: у строки ввода галочка появляется
+        только когда текст правит человек, программная подстановка её не
+        показывает. Совет отправлял искать несуществующую кнопку, и
+        размер, естественно, не применялся.
+        """
         width, height = self._monitor_size()
         if not width:
             self._toast(tr("Не удалось определить размер монитора"))
             return
         self.resolution_row.set_text(f"{width}x{height}")
-        self._toast(tr("Подставил {w}x{h} — нажмите галочку, чтобы применить",
-                       w=width, h=height))
+        self.resolution_row.emit("apply")
 
     def _on_resolution_applied(self, row: Adw.EntryRow) -> None:
         entry = self.selected
@@ -616,33 +712,39 @@ class MerciWindow(Adw.ApplicationWindow):
                 self._refresh_resolution(entry)
                 return
 
-        # Окно контейнера растягиваем на монитор, а внутренний размер
-        # дисплея Android задаём тем, что ввёл пользователь: картинка
-        # занимает весь экран, но рисуется в меньшем разрешении.
-        monitor = self._monitor_size()
-        needs_stretch = bool(width) and (width, height) != monitor
-        if needs_stretch and not waydroid.gamescope_available():
-            self._offer_gamescope(width, height)
+        # Разрешение и размер окна здесь одно и то же: Waydroid рисует
+        # ровно столько пикселей, сколько задано контейнеру, и окно
+        # получается такого же размера. Поэтому строка ведёт туда же, куда
+        # и кнопка размера в списке окон — к общему значению для всех окон.
+        if not width:
+            self._toast(tr("Укажите размер, например 1600x900"))
+            self._refresh_resolution(entry)
             return
 
-        self._toast(tr("Перезапускаем контейнер…"))
         row.set_sensitive(False)
 
-        def done(error, stretched):
-            row.set_sensitive(True)
-            if error is not None:
-                self._error(tr("Не удалось настроить дисплей"), str(error))
-                return
-            if not width:
-                self._toast(tr("Готово: размер сброшен"))
-            elif stretched:
-                self._toast(tr("Готово: рендер {w}x{h} растянут на экран",
-                               w=width, h=height))
-            else:
-                self._toast(tr("Готово: контейнер в {w}x{h}", w=width, h=height))
-            self._refresh_runtime_state(entry)
+        def work():
+            waydroid.set_global_size(
+                width, height,
+                stage=lambda text: GLib.idle_add(self._instance_stage, text),
+            )
+            return width, height
 
-        waydroid.set_display_async(width, height, monitor, done)
+        def done(result, error) -> None:
+            if self._closing:
+                return
+            row.set_sensitive(True)
+            self._instance_stage("")
+            if error is not None:
+                self._error(tr("Не удалось применить размер"), str(error))
+            elif result is not None:
+                self._toast(
+                    tr("Все окна теперь {width}×{height}", width=result[0], height=result[1])
+                )
+            if self.selected is not None:
+                self._refresh_runtime_state(self.selected)
+
+        hostexec.in_thread(work, done)
 
     def _offer_gamescope(self, width: int, height: int) -> None:
         """Без gamescope растянуть нечем: Waydroid своё окно не масштабирует."""
@@ -669,8 +771,11 @@ class MerciWindow(Adw.ApplicationWindow):
     def _refresh_runtime_state(self, entry: Entry) -> None:
         """Обновляет строки состояния. Хост опрашивается в потоке —
         обработчик выбора приложения обязан возвращаться мгновенно."""
+        # Заголовок обещал растягивание на монитор — этого не происходит:
+        # Waydroid рисует ровно столько пикселей, сколько задано, и окно
+        # получается такого же размера.
         self.resolution_row.set_title(
-            tr("Разрешение рендера, растянется на монитор (напр. 1600x900)")
+            tr("Размер всех окон (напр. 1600x900)")
         )
         # Трансляция важна только для ARM-кода: у APK с x86 в контейнере
         # она не участвует, и строка сбивала бы с толку.
@@ -705,8 +810,631 @@ class MerciWindow(Adw.ApplicationWindow):
             lambda result, _error: self._show_renderer(result),
         )
 
+        self._refresh_instances(entry)
+
         slug = entry.slug
         waydroid.state_async(True, lambda *args: self._apply_state(slug, *args))
+
+    def _refresh_instances(self, entry: Entry) -> None:
+        """Окна — это отдельные контейнеры Android, по одному на окно.
+
+        Профили для этого не годятся: их показывает только текущий
+        пользователь Android, а соседей у основного ровно два. Контейнер
+        целиком свой — свои данные, свой binder, своё окно, и предел один:
+        память.
+        """
+        slug = entry.slug
+        package = entry.package
+
+        def collect():
+            items = []
+            for item in waydroid.instances(slug):
+                number = item.get("number", 0)
+                ip = item.get("ip", "")
+                running = item.get("state") == "RUNNING"
+                installed = None
+                # «Отвечает» и «работает» — разные вещи: контейнер бывает
+                # поднят, а Android внутри мёртв. Раньше в этом случае
+                # список пакетов приходил пустым, и Merci писала
+                # «приложения здесь ещё нет» о приложении, которое стоит.
+                alive = None
+                if running and ip:
+                    alive = waydroid.system_ready(ip, 8)
+                    if alive:
+                        with suppress(Exception):
+                            installed = waydroid.instance_has_package(ip, package)
+                items.append(
+                    {
+                        "number": number,
+                        "ip": ip,
+                        "running": running,
+                        "alive": alive,
+                        "installed": installed,
+                    }
+                )
+            return items
+
+        hostexec.in_thread(
+            collect, lambda result, error: self._show_instances(slug, result, error)
+        )
+
+    def _show_instances(self, slug: str, items, error) -> None:
+        if self._closing:
+            return
+        entry = self.selected
+        if entry is None or entry.slug != slug:
+            return
+
+        for row in self._instance_rows:
+            self.instances_group.remove(row)
+        self._instance_rows.clear()
+
+        if error is not None or items is None:
+            row = Adw.ActionRow(
+                title=tr("Не удалось прочитать список окон"),
+                subtitle=str(error) if error is not None else tr("контейнер не ответил"),
+            )
+            self.instances_group.add(row)
+            self._instance_rows.append(row)
+            return
+
+        for item in items:
+            number = item["number"]
+            main = number == 1
+            row = Adw.ActionRow(
+                title=tr("Окно {number} — основное", number=number)
+                if main
+                else tr("Окно {number}", number=number)
+            )
+            row.add_prefix(
+                Gtk.Image.new_from_icon_name(
+                    "computer-symbolic" if main else "window-new-symbolic"
+                )
+            )
+            if not item["running"]:
+                row.set_subtitle(tr("остановлено"))
+            elif not item["ip"]:
+                row.set_subtitle(tr("работает · нет сети — нужен перезапуск окна"))
+            elif item.get("alive") is False:
+                row.set_subtitle(tr("работает · не отвечает — нужен перезапуск окна"))
+            elif item["installed"] is False:
+                row.set_subtitle(tr("работает · приложения здесь ещё нет"))
+            else:
+                row.set_subtitle(tr("работает · {ip}", ip=item["ip"]))
+
+            buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            buttons.set_valign(Gtk.Align.CENTER)
+
+            play = Gtk.Button(icon_name="media-playback-start-symbolic")
+            play.add_css_class("flat")
+            play.set_tooltip_text(tr("Открыть приложение в этом окне"))
+            play.connect("clicked", lambda *_, n=number: self._launch_in_window(n))
+            buttons.append(play)
+
+            if item["running"]:
+                fit = Gtk.Button(icon_name="view-fullscreen-symbolic")
+                fit.add_css_class("flat")
+                fit.set_tooltip_text(tr("Выбрать размер окна"))
+                fit.connect("clicked", lambda *_, n=number: self._choose_size(n))
+                buttons.append(fit)
+
+            if item["running"] and item["installed"]:
+                stop = Gtk.Button(icon_name="media-playback-stop-symbolic")
+                stop.add_css_class("flat")
+                stop.set_tooltip_text(tr("Закрыть приложение в этом окне"))
+                stop.connect("clicked", lambda *_, n=number: self._stop_in_window(n))
+                buttons.append(stop)
+
+            if not main:
+                remove = Gtk.Button(icon_name="user-trash-symbolic")
+                remove.add_css_class("flat")
+                remove.set_tooltip_text(tr("Удалить окно вместе с его данными"))
+                remove.connect("clicked", lambda *_, n=number: self._confirm_remove_window(n))
+                buttons.append(remove)
+
+            row.add_suffix(buttons)
+            self.instances_group.add(row)
+            self._instance_rows.append(row)
+
+    def _instance_stage(self, text: str) -> None:
+        """Ход длинной операции показываем прямо в заголовке раздела."""
+        if not self._closing:
+            self.instances_group.set_description(text)
+
+    def _create_new_instance(self) -> None:
+        """Заводит ещё один контейнер: свой Android под ещё одно окно."""
+        entry = self.selected
+        if entry is None:
+            return
+        self.btn_add_instance.set_sensitive(False)
+        slug = entry.slug
+
+        def work():
+            number = waydroid.next_instance_number()
+            owner = slug
+            GLib.idle_add(self._instance_stage, tr("Создаём окно {number}…", number=number))
+            waydroid.create_instance(number, owner)
+            GLib.idle_add(self._instance_stage, tr("Запускаем Android в окне {number}…", number=number))
+            waydroid.start_instance(number)
+            ip = waydroid.wait_instance_ip(number)
+            if ip:
+                waydroid.wait_instance_ready(ip)
+            return number
+
+        def done(number, error) -> None:
+            if self._closing:
+                return
+            self.btn_add_instance.set_sensitive(True)
+            self._instance_stage("")
+            if error is not None:
+                self._error(tr("Не удалось создать окно"), str(error))
+            else:
+                self._toast(tr("Окно {number} готово", number=number))
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        hostexec.in_thread(work, done)
+
+    def _hide_after_launch(self) -> None:
+        """Убирает Merci с глаз после удачного запуска — если так настроено.
+
+        Раньше это делалось только при запуске в основном окне, и после
+        клона библиотека оставалась поверх игры.
+        """
+        if self.settings.minimize_on_launch:
+            GLib.timeout_add_seconds(2, lambda: (self.hide_to_tray(), False)[1])
+
+    def _launch_in_window(self, number: int) -> None:
+        """Открывает приложение в выбранном окне, подняв контейнер и
+        поставив APK, если этого ещё не сделано."""
+        entry = self.selected
+        if entry is None:
+            return
+        slug = entry.slug
+
+        def work():
+            if number == 1:
+                waydroid.ensure_session()
+                # Профиль надо сделать текущим: в непереключённом профиле
+                # приложение не найдётся вовсе — Android не держит его
+                # состояние загруженным.
+                if entry.profile and waydroid.current_android_user() != entry.profile:
+                    waydroid.switch_android_user(entry.profile)
+                waydroid.launch_for_user(
+                    entry,
+                    entry.profile,
+                    lambda text: GLib.idle_add(self._instance_stage, text),
+                )
+                return number
+
+            # Основное окно готовит общее для всех: образ, мост, сокет.
+            # Пока оно не работает, остальные подняться не могут — Android
+            # в них стартует без сети и остаётся без адреса.
+            GLib.idle_add(self._instance_stage, tr("Поднимаем основное окно…"))
+            waydroid.ensure_session()
+
+            item = next((i for i in waydroid.instances() if i.get("number") == number), None)
+            if item is None:
+                raise waydroid.WaydroidError(tr("окно не найдено"))
+
+            ip = item.get("ip", "")
+            if item.get("state") != "RUNNING":
+                GLib.idle_add(
+                    self._instance_stage,
+                    tr("Запускаем окно {number}… (до трёх минут)", number=number),
+                )
+                # Помощник сам дожидается сети и, если окно зависло на
+                # запуске, перезапускает его — под тем же паролем.
+                ответ = waydroid.start_instance(number) or {}
+                ip = ответ.get("ip") or waydroid.wait_instance_ip(number)
+            if not ip:
+                raise waydroid.WaydroidError(tr("окно не получило адрес в сети"))
+
+            GLib.idle_add(self._instance_stage, tr("Ждём загрузки Android…"))
+            if not waydroid.wait_instance_ready(ip):
+                raise waydroid.WaydroidError(tr("Android в этом окне не загрузился"))
+
+            if not waydroid.instance_has_package(ip, entry.package):
+                # Контейнеры не делят установленные приложения: каждому свой.
+                GLib.idle_add(self._instance_stage, tr("Ставим приложение в окно {number}…", number=number))
+                waydroid.install_in_instance(entry, ip)
+
+            GLib.idle_add(self._instance_stage, tr("Открываем…"))
+            try:
+                waydroid.launch_in_instance(
+                    entry, ip, lambda text: GLib.idle_add(self._instance_stage, text)
+                )
+            except (waydroid.PictureStuck, waydroid.ContainerUnreachable):
+                # Либо приложение работает без окна, либо Android в окне лёг
+                # совсем. И то и другое лечится перезапуском этого окна.
+                GLib.idle_add(
+                    self._instance_stage,
+                    tr("Картинка застряла — перезапускаем окно {number}…", number=number),
+                )
+                waydroid.restart_instance(number)
+                ip = waydroid.wait_instance_ip(number)
+                if not ip or not waydroid.wait_instance_ready(ip):
+                    raise
+                GLib.idle_add(self._instance_stage, tr("Открываем…"))
+                waydroid.launch_in_instance(entry, ip)
+            return number
+
+        def done(_result, error) -> None:
+            if self._closing:
+                return
+            self._instance_stage("")
+            if error is not None:
+                self._error(tr("Окно не открылось"), str(error))
+            else:
+                self._toast(tr("Открыто окно {number}", number=number))
+                self._hide_after_launch()
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        hostexec.in_thread(work, done)
+
+    def _stop_in_window(self, number: int) -> None:
+        entry = self.selected
+        if entry is None:
+            return
+        slug = entry.slug
+
+        def work():
+            if number == 1:
+                waydroid.stop_main_app(entry.package)
+                return number
+            item = next((i for i in waydroid.instances() if i.get("number") == number), None)
+            if item and item.get("ip"):
+                waydroid.stop_in_instance(entry.package, item["ip"])
+            return number
+
+        def done(_result, error) -> None:
+            if self._closing:
+                return
+            if error is not None:
+                self._error(tr("Не удалось закрыть приложение"), str(error))
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        hostexec.in_thread(work, done)
+
+    def _choose_size(self, number: int) -> None:
+        """Спрашивает размер окна и применяет его.
+
+        Поверхность Waydroid берёт размер из свойств контейнера при старте
+        и на просьбы композитора не отзывается, поэтому размер меняется
+        только с перезапуском контейнера. Раз уж так, предлагаем готовые
+        варианты, чтобы не набирать руками.
+        """
+        entry = self.selected
+        if entry is None:
+            return
+
+        dialog = Adw.AlertDialog(
+            heading=tr("Размер окон"),
+            body=tr("Размер применится ко всем окнам сразу — и к тем, что "
+                    "появятся позже. Контейнеры для этого перезапускаются, "
+                    "по сорок секунд на каждый работающий."),
+        )
+        sizes = (("hd", 1280, 720), ("hdplus", 1600, 900), ("fhd", 1920, 1080))
+        for key, width, height in sizes:
+            dialog.add_response(key, f"{width}×{height}")
+        dialog.add_response("current", tr("Под текущее окно"))
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.set_close_response("cancel")
+
+        def answer(_dialog, response: str) -> None:
+            if response == "cancel":
+                return
+            if response == "current":
+                self._apply_size(number, 0, 0)
+                return
+            for key, width, height in sizes:
+                if key == response:
+                    self._apply_size(number, width, height)
+                    return
+
+        dialog.connect("response", answer)
+        dialog.present(self)
+
+    def _apply_size(self, number: int, width: int, height: int) -> None:
+        """Применяет размер ко всем окнам.
+
+        Размер пишется в общие свойства контейнеров, поэтому его получают и
+        существующие окна, и те, что будут созданы позже. Нулевой размер
+        значит «взять с окна на экране».
+        """
+        entry = self.selected
+        if entry is None:
+            return
+        slug = entry.slug
+
+        def work():
+            size = (width, height)
+            if not all(size):
+                window = waydroid.window_for_package(entry.package)
+                if window is None:
+                    raise waydroid.WaydroidError(
+                        tr("окно этого приложения на экране не найдено")
+                    )
+                size = (window["width"], window["height"])
+            waydroid.set_global_size(
+                size[0], size[1], stage=lambda text: GLib.idle_add(self._instance_stage, text)
+            )
+            return size
+
+        def done(result, error) -> None:
+            if self._closing:
+                return
+            self._instance_stage("")
+            if error is not None:
+                self._error(tr("Не удалось применить размер"), str(error))
+            elif result is not None:
+                self._toast(
+                    tr("Все окна теперь {width}×{height}", width=result[0], height=result[1])
+                )
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        hostexec.in_thread(work, done)
+
+    def _fit_window(self, number: int, width: int = 0, height: int = 0) -> None:
+        """Подгоняет приложение под размер окна на хосте.
+
+        Waydroid не меняет размер картинки вслед за рамкой окна: размер
+        дисплея он берёт при старте. Поэтому запоминаем размер окна в
+        свойствах контейнера и поднимаем этот контейнер заново — только
+        его, остальные окна продолжают работать.
+        """
+        entry = self.selected
+        if entry is None:
+            return
+        slug = entry.slug
+
+        def work():
+            size = (width, height)
+            if not all(size):
+                window = waydroid.window_for_package(entry.package)
+                if window is None:
+                    raise waydroid.WaydroidError(
+                        tr("окно этого приложения на экране не найдено")
+                    )
+                size = (window["width"], window["height"])
+            item = next(
+                (i for i in waydroid.instances() if i.get("number") == number), None
+            )
+            if item is None or not item.get("ip"):
+                raise waydroid.WaydroidError(tr("окно не найдено"))
+            waydroid.fit_display(number, item["ip"], size[0], size[1])
+            return size
+
+        def done(result, error) -> None:
+            if self._closing:
+                return
+            if error is not None:
+                self._error(tr("Не удалось подогнать под окно"), str(error))
+            elif result is not None:
+                self._toast(
+                    tr("Подогнано под {width}×{height}", width=result[0], height=result[1])
+                )
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        hostexec.in_thread(work, done)
+
+    def _confirm_remove_window(self, number: int) -> None:
+        dialog = Adw.AlertDialog(
+            heading=tr("Удалить окно {number}?", number=number),
+            body=tr("Контейнер и все его данные будут стёрты: установленные "
+                    "приложения, входы, кеш. Другие окна это не затронет."),
+        )
+        dialog.add_response("cancel", tr("Отмена"))
+        dialog.add_response("remove", tr("Удалить"))
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.connect(
+            "response",
+            lambda _d, response: response == "remove" and self._remove_window(number),
+        )
+        dialog.present(self)
+
+    def _remove_window(self, number: int) -> None:
+        slug = self.selected.slug if self.selected is not None else ""
+
+        def done(_result, error) -> None:
+            if self._closing:
+                return
+            self._instance_stage("")
+            if error is not None:
+                self._error(tr("Не удалось удалить окно"), str(error))
+            else:
+                self._toast(tr("Окно {number} удалено", number=number))
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        self._instance_stage(tr("Удаляем окно {number}…", number=number))
+        hostexec.in_thread(lambda: waydroid.remove_instance(number), done)
+
+    def _launch_all_instances(self) -> None:
+        """Открывает приложение во всех существующих окнах, по очереди."""
+        entry = self.selected
+        if entry is None:
+            return
+        slug = entry.slug
+
+        def work():
+            opened, failures = 0, []
+            for item in waydroid.instances(slug):
+                number = item.get("number", 0)
+                try:
+                    GLib.idle_add(self._instance_stage, tr("Открываем окно {number}…", number=number))
+                    self._launch_window_blocking(entry, number)
+                    opened += 1
+                except Exception as failure:  # noqa: BLE001 — причина уйдёт человеку
+                    failures.append(f"{number}: {failure}")
+            if failures and not opened:
+                raise waydroid.WaydroidError("; ".join(failures))
+            return opened, failures
+
+        def done(result, error) -> None:
+            if self._closing:
+                return
+            self._instance_stage("")
+            if error is not None:
+                self._error(tr("Окна не открылись"), str(error))
+            elif result is not None:
+                opened, failures = result
+                if failures:
+                    self._toast(tr("Открыто окон: {count}, с ошибками: {bad}",
+                                   count=opened, bad=len(failures)))
+                else:
+                    self._toast(tr("Открыто окон: {count}", count=opened))
+                if opened:
+                    self._hide_after_launch()
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        hostexec.in_thread(work, done)
+
+    def _launch_window_blocking(self, entry: Entry, number: int) -> None:
+        """Синхронная часть запуска — её зовут из потока."""
+        if number == 1:
+            waydroid.ensure_session()
+            if entry.profile and waydroid.current_android_user() != entry.profile:
+                waydroid.switch_android_user(entry.profile)
+            waydroid.launch_for_user(
+                entry,
+                entry.profile,
+                lambda text: GLib.idle_add(self._instance_stage, text),
+            )
+            return
+        waydroid.ensure_session()
+        item = next((i for i in waydroid.instances() if i.get("number") == number), None)
+        if item is None:
+            return
+        ip = item.get("ip", "")
+        if item.get("state") != "RUNNING":
+            waydroid.start_instance(number)
+            ip = waydroid.wait_instance_ip(number)
+        if not ip or not waydroid.wait_instance_ready(ip):
+            raise waydroid.WaydroidError(tr("Android в этом окне не загрузился"))
+        if not waydroid.instance_has_package(ip, entry.package):
+            waydroid.install_in_instance(entry, ip)
+        try:
+            waydroid.launch_in_instance(entry, ip)
+        except (waydroid.PictureStuck, waydroid.ContainerUnreachable):
+            waydroid.restart_instance(number)
+            ip = waydroid.wait_instance_ip(number)
+            if not ip or not waydroid.wait_instance_ready(ip):
+                raise
+            waydroid.launch_in_instance(entry, ip)
+
+    def _stop_all_instances(self) -> None:
+        entry = self.selected
+        if entry is None:
+            return
+        slug = entry.slug
+
+        def work():
+            for item in waydroid.instances(slug):
+                with suppress(Exception):
+                    if item.get("number") == 1:
+                        waydroid.stop_main_app(entry.package)
+                    elif item.get("ip"):
+                        waydroid.stop_in_instance(entry.package, item["ip"])
+            return True
+
+        def done(_result, _error) -> None:
+            if self._closing:
+                return
+            self._toast(tr("Приложение закрыто во всех окнах"))
+            if self.selected is not None and self.selected.slug == slug:
+                self._refresh_instances(self.selected)
+
+        hostexec.in_thread(work, done)
+
+    def _on_eco_mode_toggled(self, row, _param) -> None:
+        active = row.get_active()
+        self.settings.eco_mode = active
+        hostexec.in_thread(lambda: waydroid.apply_eco_mode(active))
+        self._toast(
+            tr("Режим экономии включён (анимации отключены)")
+            if active
+            else tr("Режим экономии выключен")
+        )
+
+    def _on_fps_changed(self, row, _param) -> None:
+        idx = row.get_selected()
+        if 0 <= idx < len(self._fps_values):
+            fps = self._fps_values[idx]
+            self.settings.fps_limit = fps
+            hostexec.in_thread(lambda: waydroid.set_fps_limit(fps))
+            if fps > 0:
+                self._toast(tr("Установлен лимит {fps} FPS", fps=fps))
+            else:
+                self._toast(tr("Лимит FPS снят"))
+
+    def _apply_freeform_opt(self) -> None:
+        self._toast(tr("Применяем настройки многооконности…"))
+        hostexec.in_thread(
+            waydroid.apply_multiwindow_optimizations,
+            lambda _res, err: self._toast(
+                tr("Свободный режим многооконности активен!")
+                if not err
+                else tr("Не удалось применить: {err}", err=err)
+            ),
+        )
+
+    def _trim_ram(self) -> None:
+        self._toast(tr("Очищаем память Android…"))
+        hostexec.in_thread(
+            waydroid.trim_android_memory,
+            lambda _res, err: self._toast(
+                tr("Память Android успешно очищена!")
+                if not err
+                else tr("Ошибка очистки памяти: {err}", err=err)
+            ),
+        )
+
+    def _guard_screens(self) -> bool:
+        """Раз в двадцать секунд возвращает в покой окна без картинки."""
+        if self._closing:
+            return False
+        if not self._guard_busy:
+            self._guard_busy = True
+
+            def done(вернули, _error) -> None:
+                self._guard_busy = False
+                for запись in вернули or []:
+                    print(f"[merci] окно {запись}: картинки нет, вернули в покой")
+
+            hostexec.in_thread(waydroid.guard_idle_screens, done)
+        return True
+
+    def _retry_state_later(self, slug: str, error) -> bool:
+        """Контейнер ещё поднимается — перечитаем состояние через пару секунд.
+
+        Без этого строки карточки навсегда остаются с ответом, снятым в тот
+        момент, когда адреса у контейнера ещё не было: приложение уже
+        работает, а карточка уверяет, что контейнер не запущен. Повторов
+        конечное число — если контейнер и правда мёртв, карточка не должна
+        опрашивать его вечно.
+        """
+        if not isinstance(error, waydroid.ContainerUnreachable):
+            return False
+        if self._state_retries >= 8 or self._state_retry_pending:
+            return False
+        self._state_retries += 1
+        self._state_retry_pending = True
+
+        def again() -> bool:
+            self._state_retry_pending = False
+            entry = self.selected
+            if not self._closing and entry is not None and entry.slug == slug:
+                self._refresh_runtime_state(entry)
+            return False
+
+        GLib.timeout_add_seconds(4, again)
+        return True
 
     def _show_build(self, slug: str, result, error) -> None:
         """Какая сборка этого пакета сейчас стоит в контейнере.
@@ -721,7 +1449,10 @@ class MerciWindow(Adw.ApplicationWindow):
         if entry is None or entry.slug != slug:
             return
         if error is not None or not result:
-            self.build_row.set_subtitle(tr("контейнер не ответил"))
+            self.build_row.set_subtitle(
+                str(error) if error is not None else tr("контейнер не ответил")
+            )
+            self._retry_state_later(slug, error)
             return
         digest, version = result
         if digest is None:
@@ -752,7 +1483,14 @@ class MerciWindow(Adw.ApplicationWindow):
         if entry is None or entry.slug != slug:
             return
         if error is not None or users is None:
-            self.profile_row.set_subtitle(tr("контейнер не ответил: {error}", error=error))
+            # Пока контейнер поднимается, он сам объясняет причину — второй
+            # раз про «не ответил» писать незачем.
+            self.profile_row.set_subtitle(
+                str(error)
+                if isinstance(error, waydroid.ContainerUnreachable)
+                else tr("контейнер не ответил: {error}", error=error)
+            )
+            self._retry_state_later(slug, error)
             return
 
         values = [0] + sorted(n for n in users if n > 0)
@@ -1001,9 +1739,8 @@ class MerciWindow(Adw.ApplicationWindow):
             self.library.save(entry)
             self.row_last.set_subtitle(_human_time(entry.last_run))
             self._toast(tr("Окно откроет Waydroid"))
-            if self.settings.minimize_on_launch:
-                # Библиотека нужна была до нажатия; поверх игры она лишняя.
-                GLib.timeout_add_seconds(2, lambda: (self.hide_to_tray(), False)[1])
+            # Библиотека нужна была до нажатия; поверх игры она лишняя.
+            self._hide_after_launch()
             # Приложение может умереть через несколько секунд: без этого
             # выглядит как «не запустилось», и пользователь жмёт ещё раз.
             started = time.time()
@@ -1070,8 +1807,7 @@ class MerciWindow(Adw.ApplicationWindow):
             self.library.save(entry)
             self.row_last.set_subtitle(_human_time(entry.last_run))
             self._toast(tr("{name}: установка заменена, открываем", name=entry.name))
-            if self.settings.minimize_on_launch:
-                GLib.timeout_add_seconds(2, lambda: (self.hide_to_tray(), False)[1])
+            self._hide_after_launch()
 
         waydroid.replace_install_async(
             entry,
@@ -1289,6 +2025,19 @@ class MerciWindow(Adw.ApplicationWindow):
         self.multiuser_row.set_active(self.settings.multiuser)
         self.multiuser_row.connect("notify::active", self._on_multiuser_toggled)
         group.add(self.multiuser_row)
+
+        # Копии приложения работают одновременно с оригиналом, но показать
+        # оба окна контейнер может только в многооконном режиме — иначе
+        # рисует что-то одно.
+        self.multiwindow_row = Adw.SwitchRow(
+            title=tr("Отдельные окна для приложений"),
+            subtitle=tr("копия и оригинал становятся видны одновременно; "
+            "полноэкранные игры это не берут — Android показывает их по "
+            "очереди. Контейнер перезапустится"),
+        )
+        self.multiwindow_row.set_sensitive(False)
+        group.add(self.multiwindow_row)
+        hostexec.in_thread(waydroid.multi_windows_on, self._show_multi_windows)
         page.add(group)
 
         window_group = Adw.PreferencesGroup(title=tr("Окно"))
@@ -1366,6 +2115,41 @@ class MerciWindow(Adw.ApplicationWindow):
         self.tray.set_items(self._tray_items())
         self.refresh(selected)
         return GLib.SOURCE_REMOVE
+
+    def _show_multi_windows(self, result, _error) -> None:
+        """Состояние берём у контейнера, а не из своих настроек: свойство
+        могли поменять и мимо Merci."""
+        if self._closing:
+            return
+        self._syncing_multiwindow = True
+        self.multiwindow_row.set_active(bool(result))
+        self.multiwindow_row.set_sensitive(True)
+        self._syncing_multiwindow = False
+        self.multiwindow_row.connect("notify::active", self._on_multi_windows_toggled)
+
+    def _on_multi_windows_toggled(self, row, _param) -> None:
+        if getattr(self, "_syncing_multiwindow", False):
+            return
+        enabled = row.get_active()
+        row.set_sensitive(False)
+        self._toast(tr("Перезапускаем контейнер…"))
+
+        def done(_result, error) -> None:
+            if self._closing:
+                return
+            row.set_sensitive(True)
+            if error is not None:
+                self._error(tr("Не удалось переключить режим окон"), str(error))
+                return
+            self._toast(
+                tr("Каждое приложение теперь в своём окне")
+                if enabled
+                else tr("Контейнер снова показывает одно окно")
+            )
+            if self.selected is not None:
+                self._refresh_runtime_state(self.selected)
+
+        hostexec.in_thread(lambda: waydroid.set_multi_windows(enabled), done)
 
     def _on_multiuser_toggled(self, row, _param) -> None:
         active = row.get_active()
