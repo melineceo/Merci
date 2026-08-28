@@ -1,0 +1,7 @@
+[Flatpak Repo]
+Title=Merci
+Url=https://melineceo.github.io/Merci/repo/
+Homepage=https://github.com/melineceo/Merci
+Comment=Запуск Android-приложений в Linux
+Description=Библиотека APK с графической оболочкой над Waydroid
+Icon=https://melineceo.github.io/Merci/icon.png
