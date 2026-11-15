@@ -8,7 +8,7 @@
 
 **Android apps on Linux — drop in an APK and launch it.**
 
-[![version](https://img.shields.io/badge/version-0.1.2-7c5cff)](https://github.com/melineceo/Merci/releases)
+[![version](https://img.shields.io/badge/version-0.2.0-7c5cff)](https://github.com/melineceo/Merci/releases)
 [![beta](https://img.shields.io/badge/status-beta-ffb02e)](#-this-is-a-beta)
 [![changelog](https://img.shields.io/badge/changelog-CHANGELOG-8a8f98)](CHANGELOG.en.md)
 [![license](https://img.shields.io/badge/license-MIT-3aa675)](LICENSE)
@@ -175,8 +175,8 @@ whatever is missing and runs the steps one by one, showing the output in a log:
 | Android image | `sudo waydroid init`, ~1 GB from sourceforge |
 | Session | `waydroid session start` — a background step: the command never exits, it *is* the session process, so readiness is checked with `waydroid status` |
 | Internet access | `ufw allow in on waydroid0` — by default `ufw` cuts DHCP and forwarding for the container |
-| Translator archive | downloaded by Merci itself: resumable with `-C -`, with retries and an md5 check |
-| ARM64 → x86_64 translation | `waydroid_script` from GitHub, then `install libhoudini` |
+| Translator archive | downloaded by Merci itself: retried on dropped connections, checksum verified; a server refusal is not retried |
+| ARM64 → x86_64 translation | installed by Merci's helper — only from an archive with a known checksum |
 
 What you see while it runs:
 
@@ -243,6 +243,44 @@ One more subtlety, the reason progress used to never appear at all: `waydroid`
 is written in Python, and Python buffers pipe output in 8 KB blocks. Progress
 lines stayed in the buffer and reached neither the log nor the terminal. That is
 why commands are started with `PYTHONUNBUFFERED=1`.
+
+## Updates
+
+Merci stands on other people's shoulders — the Android image, the Waydroid
+package (or waydroid-nvidia), the ARM translator — and each has a life of
+its own. A new image used to be announced only by Android's built-in
+updater, as a pile of notifications inside the container; you installed it
+by hand, and settings were lost afterwards.
+
+Now the **update centre** does it: “Updates” in the menu, the row at the
+bottom of the library, or “Check for updates” in settings. The check runs by
+itself — at start-up and once a day — and installs nothing: it only says
+what is out. You install, with a click; most updates ask for your password.
+
+| What | From | How it is installed |
+|---|---|---|
+| Android image | channels from `waydroid.cfg` (the same `waydroid upgrade` uses) | the stock `waydroid upgrade`, supervised by the helper |
+| Waydroid package | AUR (waydroid-nvidia), apt, dnf | built from the AUR or via the package manager; on Arch repository packages arrive with `pacman -Syu` — Merci only tells you |
+| ARM translator | a verified libhoudini archive | the same step the setup wizard uses |
+| Merci itself | its Flatpak repository | `flatpak update`; for a per-user install — without asking, unless turned off |
+
+Why not just `sudo waydroid upgrade`:
+
+- it extracts the new image **over** the current one, with no copy. Merci
+  keeps the current one first (instantly on btrfs and xfs) and can bring it
+  back;
+- extra windows keep the image mounted — rewriting the file underneath them
+  corrupts their file system. Merci switches them off first;
+- container properties are regenerated afterwards. Merci keeps its own
+  settings (window size, user limit, flicker fix) where they survive that,
+  and verifies them after the update;
+- after a package **or NVIDIA driver** update, waydroid-nvidia needs its
+  setup run again (`waydroid-nvidia-setup`), otherwise the container does
+  not start. Merci runs it by itself — in the same rendering mode.
+
+Merci hides Android's built-in updater (`org.lineageos.waydroidupdater`):
+tapping its notification rewrites the image underneath running windows. You
+can bring it back in settings.
 
 ## Frame rate in Waydroid
 
@@ -420,24 +458,55 @@ container window, and Merci offers to open that window.
 
 ## Root inside the container
 
-Menu → “Install root (Magisk)”. Magisk Delta is installed through the same
-`waydroid_script`: this is your own Android, so access to system partitions,
-debugging and modules is a normal capability here.
+Menu → “Install root (Magisk)”. Magisk Delta is installed: this is your own
+Android, so access to system partitions, debugging and modules is a normal
+capability here.
 
-One subtlety in somebody else's code: for Magisk `waydroid_script` **deletes the
-already downloaded file and downloads it again**, without checking the sum. On
-an unstable link that is a guaranteed failure, so Merci downloads the APK itself
-(resumable, with retries) and makes the download conditional in its own copy of
-the script — two `sed` calls over `stuff/magisk.py`, with the reasoning written
-right in the step.
+It is installed and removed by Merci's own helper — the one that creates
+windows. This used to be done by `waydroid_script`: Merci cloned it from GitHub
+and ran it as root, and the script downloaded Magisk itself with no checksum.
+In November 2026 that backfired twice. The repository Magisk Delta was served
+from disappeared (the address now returns 404, and anyone may take the freed
+name). And `waydroid-nvidia` 0.2.0 started printing its acceleration mode to
+stderr — while the script treats any line there as an error, so removing root
+reported a failure after it had already done the job, and left Waydroid
+switched off.
+
+The rules now:
+
+- only a file with a known SHA-256 goes in as root — the list of builds is
+  baked into the helper, on the root side, and Merci cannot get around it;
+- the file comes from Merci's cache or from Downloads; the network is tried
+  last, and a server refusal is explained at once instead of being retried
+  dozens of times;
+- the file is looked for before the password prompt and before Waydroid is
+  stopped: if it is not found, nothing has been touched;
+- however the step ends, Waydroid returns to the state it was in.
+
+There is currently no verified copy of Magisk Delta on the network, so the
+installation works where the file was already downloaded by an earlier Merci —
+or if you put it into Downloads. The checksum of the build Merci trusts:
+`a3c37c4172b6ce7fdfbcccb2a608ef84b0a267d7aaef7c183047adceb8494c80`
+(Magisk Delta `0fe46c5a`, signed by its author).
 
 Root does not pass device checks in games and cannot — quite the opposite, to
 such checks a container with Magisk looks even more suspicious. Merci does not
 install attestation-spoofing modules.
 
-It is removed the same way: “Remove root (Magisk)” in the menu runs
-`waydroid_script remove magisk` and restarts the container. Installing root
-without a way to remove it is a bad deal.
+The ARM translators (“Switch ARM translator”) are installed the same way, by
+the same helper and under the same rules: there is no `waydroid_script` left
+in Merci at all. A translator goes in whole or not at all, and on a switch
+the previous one is removed — exactly one stays in the system.
+
+In the wizard such steps can be cancelled while they download or build; once
+root work begins, the “Cancel” button disappears: it could not stop that work
+anyway.
+
+“Remove root (Magisk)” in the menu downloads nothing: the helper deletes the
+Magisk files from the system and from the data of every window, the container
+restarts, and then Merci uninstalls the Magisk app as well. Modules stay in the
+data — bring root back and they come back too. Installing root without a way
+to remove it is a bad deal.
 
 ## Hardware acceleration on NVIDIA
 
@@ -447,21 +516,33 @@ NVIDIA driver — hence `ro.hardware.egl=swiftshader` and CPU rendering. The
 around it: the guest gets Mesa Venus, and Vulkan calls are proxied through a
 unix socket into the host's real driver.
 
-Menu → “NVIDIA hardware acceleration”. Merci first checks whether the machine
-qualifies and refuses when it does not:
+Menu → “NVIDIA hardware acceleration”. The item first looks at what is
+already there:
 
-| Requirement | Why |
-|---|---|
-| open kernel modules (`nvidia-open`) | the proprietary ones have no DMA-BUF, and here every displayed buffer is exactly that |
-| driver 595.71+ | the required interfaces are missing in earlier versions |
-| Turing or newer | a consequence of the open modules |
+- **acceleration is installed** — it says which (package version, mode, how
+  the container renders right now) and does not offer to install it again.
+  There is only “Set up again” — for when the container stopped starting or
+  renders on the CPU after a driver or package update;
+- **not installed** — it offers to enable it. A loaded NVIDIA driver is
+  required; the rest (GPU model, driver version, open or proprietary kernel
+  modules) is checked by the waydroid-nvidia setup itself: it tries the
+  driver on this machine before changing anything and names the reason when
+  it refuses.
 
-The step installs `waydroid-nvidia-bin` from the AUR (the package **replaces**
-`waydroid` — the same Waydroid with patches; the image and your data stay), runs
-`waydroid-nvidia-setup` with your monitor's refresh rate, enables the
-`waydroid-container` and `wd-venus` services and restarts the session. `yay`
-runs as your user, and its inner `sudo` gets `-A` so that the same system dialog
-asks for the password.
+The step builds `waydroid-nvidia-bin` from the AUR as your user (`makepkg`),
+changing nothing in the system. Everything that does change it — replacing
+the `waydroid` package (the same Waydroid with patches; the image and your
+data stay), `waydroid-nvidia-setup` with your monitor's refresh rate, the
+`waydroid-container` and `wd-venus` services — is done by Merci's helper in a
+single run as root, with one password prompt; the checksum of the built
+package is verified before it is installed. After the setup the helper puts
+back what Merci maintains itself: the window size, the Android user limit and
+the flicker fix — the waydroid-nvidia setup turns subsurfaces back on every
+time it runs.
+
+Merci can only build from the AUR on Arch and its derivatives. On other
+systems waydroid-nvidia is installed as its own project describes; Merci
+recognises an existing install and maintains it — with re-setup and updates.
 
 Checking the result:
 
@@ -493,6 +574,12 @@ and restarts the container:
 |---|---|
 | `waydroid.cfg` | applied when the session starts |
 | `waydroid_base.prop` | read by `init` when the container boots — otherwise a restart brings the old value back |
+
+The waydroid-nvidia setup turns this mode back on every time it runs. Merci
+remembers that you turned it off: after a setup or an update that Merci runs
+itself, the mode goes back to “off”. If the setup was run outside Merci (or by
+an earlier Merci version), it says so at startup — “The flicker fix was reset
+by the acceleration setup” — and offers to restore it.
 
 By the way, the difference between those two files is worth remembering in
 general: Android only allows `ro.*` properties to be set before `init` starts,
@@ -687,18 +774,21 @@ the same app works. So the wizard installs `libhoudini`, and switching to
 `libndk` is available in the menu — some apps get along better with it.
 
 Merci shows the crash report itself: menu → “Android crash log”. It takes the
-freshest `tombstone` from `~/.local/share/waydroid/data/tombstones`, and unlike
-`waydroid logcat` that needs no root.
+freshest `tombstone` from `~/.local/share/waydroid/data/tombstones` and the
+same directories of the extra windows, and unlike `waydroid logcat` that needs
+no root. And when an app crashes right after launch, “Details” in the message
+about it opens the report of that very crash.
 
 ## Worth understanding
 
 - Waydroid is an Android container, not an isolated flatpak sandbox. An app
   inside lives by Android's rules and stays installed in the container even
   after its entry is deleted from Merci's library.
-- Both translators are proprietary builds taken from Android x86_64 images;
-  `waydroid_script` pulls them from GitHub. Merci downloads the archives itself
-  (resumable, with an md5 check), because the script does it in a single request
-  and dies at the first dropped connection.
+- Both translators are proprietary builds taken from Android x86_64 images (the
+  same ones `waydroid_script` installs). Merci downloads the archives itself
+  and installs them with its own helper: only an archive with a known checksum
+  gets into the system, and `waydroid_script` itself no longer takes part in
+  Merci — it used to be cloned from GitHub and run as root.
 - Modified game clients break the games' terms of use, and such terms usually
   end in a banned account. Merci launches an APK file and knows nothing about
   what is inside it.
@@ -720,7 +810,7 @@ bash scripts/publish.sh
 # 3. put the repository on GitHub Pages
 bash scripts/publish-pages.sh
 # 4. tag the release
-git tag v0.1.2 && git push origin v0.1.2
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The tag step starts the [workflow](.github/workflows/publish.yml): it builds the

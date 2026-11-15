@@ -16,10 +16,26 @@ import time
 from gi.repository import GLib
 
 
-def host_argv(argv: list[str]) -> list[str]:
-    """Команда для хоста. Вне флатпака — как есть."""
+# Код возврата «команда не уложилась в срок» — тот же, что у timeout из
+# coreutils. Отдельный от 127 («команду не удалось запустить») намеренно:
+# «не ответила» и «не существует» требуют разных решений, а раньше оба
+# случая выглядели одинаково, и молчание занятого контейнера читалось как
+# «контейнер остановлен».
+TIMED_OUT = 124
+
+
+def host_argv(argv: list[str], watch: bool = False) -> list[str]:
+    """Команда для хоста. Вне флатпака — как есть.
+
+    ``watch`` привязывает команду к посреднику: стоит flatpak-spawn
+    исчезнуть, портал гасит и её. Без этого таймаут убивал только
+    посредника, а сама команда оставалась на хосте — зависшие `adb shell`
+    и `waydroid prop` копились там с каждым опросом подвисшего контейнера.
+    Для того, что должно пережить Merci (окно Android, шаги в терминале),
+    привязка не нужна — поэтому она по запросу.
+    """
     if shutil.which("flatpak-spawn"):
-        return ["flatpak-spawn", "--host", *argv]
+        return ["flatpak-spawn", "--host", *(["--watch-bus"] if watch else []), *argv]
     return argv
 
 
@@ -27,9 +43,30 @@ def run(argv: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
     """Синхронный вызов. Только вне главного потока."""
     try:
         return subprocess.run(
+            host_argv(argv, watch=True),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, returncode=TIMED_OUT, stdout="", stderr="")
+    except OSError:
+        return subprocess.CompletedProcess(argv, returncode=127, stdout="", stderr="")
+
+
+def run_detached(argv: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
+    """То же, что run, но команда на хосте переживает и таймаут, и нас.
+
+    Для того, что нельзя обрывать на середине, — помощника под root.
+    """
+    try:
+        return subprocess.run(
             host_argv(argv), capture_output=True, text=True, timeout=timeout, check=False
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, returncode=TIMED_OUT, stdout="", stderr="")
+    except OSError:
         return subprocess.CompletedProcess(argv, returncode=127, stdout="", stderr="")
 
 

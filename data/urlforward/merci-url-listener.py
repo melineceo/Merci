@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
 """Открывает на хосте ссылки, присланные из Waydroid.
 
-Слушает только адрес моста контейнера (192.168.240.1) — снаружи машины порт
-недоступен, а из самого контейнера доступен без настройки. Принимает один
-запрос вида /open?url=… и передаёт адрес xdg-open.
+Слушает только адрес моста контейнера (192.168.240.1) и принимает запросы
+только из сети контейнеров. Одной привязки к адресу для этого мало: Linux
+принимает пакет на любой свой адрес с любого интерфейса, так что сосед по
+локальной сети, знающий маршрут, достучался бы и сюда — и открывал бы в
+браузере хозяина любые страницы. Поэтому смотрим ещё и на отправителя.
+
+Принимает один запрос вида /open?url=… и передаёт адрес xdg-open.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 BRIDGE = "192.168.240.1"
 PORT = 7749
+# Сеть моста waydroid0: отсюда приходят контейнеры, и только им мы отвечаем.
+CONTAINERS = ipaddress.ip_network("192.168.240.0/24")
+# Длиннее ссылок не бывает; всё, что больше, — либо ошибка, либо злой умысел.
+MAX_URL = 4096
+# Сколько ссылок открываем за минуту. Приложение в контейнере — чужой код:
+# без предела оно завалило бы рабочий стол вкладками.
+MAX_PER_MINUTE = 12
 # Значение из <linux/in.h>: в socket его нет, а число стабильное.
 _IP_FREEBIND = 15
 # Открываем только веб-ссылки: schemes вроде file:// сюда попадать не должны.
@@ -96,8 +109,38 @@ def _session_env() -> dict[str, str]:
     return env
 
 
+_recent: list[float] = []
+_recent_guard = threading.Lock()
+
+
+def _allowed_now() -> bool:
+    """Не чаще MAX_PER_MINUTE ссылок в минуту."""
+    now = time.monotonic()
+    with _recent_guard:
+        _recent[:] = [stamp for stamp in _recent if now - stamp < 60]
+        if len(_recent) >= MAX_PER_MINUTE:
+            return False
+        _recent.append(now)
+        return True
+
+
 class Handler(BaseHTTPRequestHandler):
+    # Запрос должен прийти целиком за разумное время: без этого одно
+    # зависшее соединение держало бы поток вечно.
+    timeout = 15
+
     def do_GET(self) -> None:  # noqa: N802 — имя задано базовым классом
+        try:
+            sender = ipaddress.ip_address(self.client_address[0])
+        except ValueError:
+            sender = None
+        if sender is None or sender not in CONTAINERS:
+            self.send_error(403)
+            return
+
+        if len(self.path) > MAX_URL + 64:
+            self.send_error(414)
+            return
         request = urlparse(self.path)
         if request.path == "/ping":
             # Проверка связи из приложения: ничего не открываем, просто
@@ -114,6 +157,12 @@ class Handler(BaseHTTPRequestHandler):
         url = values[0] if values else ""
         if not url.startswith(ALLOWED):
             self.send_error(400, "only http/https")
+            return
+        if len(url) > MAX_URL or any(ord(char) < 0x20 or ord(char) == 0x7F for char in url):
+            self.send_error(400, "bad url")
+            return
+        if not _allowed_now():
+            self.send_error(429)
             return
 
         self.send_response(204)
@@ -152,14 +201,19 @@ class Handler(BaseHTTPRequestHandler):
         print(fmt % args, flush=True)
 
 
-class FreebindServer(HTTPServer):
+class FreebindServer(ThreadingHTTPServer):
     """Позволяет занять адрес моста до того, как он появится.
+
+    Сервер многопоточный: обработчик ждёт xdg-open до десяти секунд, и с
+    одним потоком следующая ссылка всё это время стояла бы в очереди.
 
     Мост waydroid0 создаётся при старте контейнера, а служба поднимается
     вместе с сеансом — и раньше падала с «Cannot assign requested address»,
     уходя в бесконечный перезапуск. IP_FREEBIND снимает это условие: адрес
     можно занять заранее.
     """
+
+    daemon_threads = True
 
     def server_bind(self) -> None:
         self.socket.setsockopt(socket.SOL_IP, _IP_FREEBIND, 1)
@@ -179,7 +233,8 @@ def main() -> int:
         while True:
             time.sleep(5)
             try:
-                server = HTTPServer((BRIDGE, PORT), Handler)
+                server = ThreadingHTTPServer((BRIDGE, PORT), Handler)
+                server.daemon_threads = True
                 break
             except OSError:
                 continue

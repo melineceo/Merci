@@ -138,15 +138,22 @@ class MenuItem:
 class TrayIcon:
     """Значок и меню. Все действия уходят в главный поток через idle_add."""
 
-    def __init__(self, app_id: str, title: str, items: list[MenuItem], on_activate):
+    def __init__(
+        self, app_id: str, title: str, items: list[MenuItem], on_activate, on_lost=None
+    ):
         self.app_id = app_id
         self.title = title
         self.items = items
         self.on_activate = on_activate
+        # Зовётся, когда панель со значками пропала: окно, спрятанное в
+        # трей, после этого вернуть нечем, и хозяину надо об этом знать.
+        self.on_lost = on_lost
         self.registered = False
         self._connection: Gio.DBusConnection | None = None
         self._ids: list[int] = []
         self._revision = 1
+        self._watch = 0
+        self._pixmap_cache: GLib.Variant | None = None
 
     # -- запуск ------------------------------------------------------------
 
@@ -175,6 +182,22 @@ class TrayIcon:
         except GLib.Error:
             return
 
+        # Регистрируемся не один раз при старте, а каждый раз, когда панель
+        # появляется на шине. Панели перезапускают — при смене темы, при
+        # обновлении оболочки, — и новая о нашем значке ничего не знает.
+        # Раньше значок после этого пропадал насовсем, а Merci продолжала
+        # считать, что он есть, и прятала в него окно: вернуть его было
+        # нечем. Слежка за именем даёт оба события: «панель появилась» (в
+        # том числе сразу, если она уже работает) и «панель пропала».
+        self._watch = Gio.bus_watch_name_on_connection(
+            connection,
+            WATCHER_NAME,
+            Gio.BusNameWatcherFlags.NONE,
+            self._on_watcher_appeared,
+            self._on_watcher_vanished,
+        )
+
+    def _on_watcher_appeared(self, connection, _name, _owner) -> None:
         connection.call(
             WATCHER_NAME,
             WATCHER_PATH,
@@ -187,6 +210,12 @@ class TrayIcon:
             None,
             self._on_registered,
         )
+
+    def _on_watcher_vanished(self, _connection, _name) -> None:
+        had_icon = self.registered
+        self.registered = False
+        if had_icon and self.on_lost is not None:
+            GLib.idle_add(self._run, self.on_lost)
 
     def _on_registered(self, connection, result) -> None:
         try:
@@ -220,6 +249,9 @@ class TrayIcon:
     def stop(self) -> None:
         if self._connection is None:
             return
+        if self._watch:
+            Gio.bus_unwatch_name(self._watch)
+            self._watch = 0
         for registration in self._ids:
             self._connection.unregister_object(registration)
         self._ids.clear()
@@ -231,7 +263,11 @@ class TrayIcon:
         """Значок в том виде, в каком его ждёт трей: ARGB, старший байт первым.
 
         Готовим сразу несколько размеров — панель возьмёт подходящий сама.
+        Один раз: картинка не меняется, а панель спрашивает её при каждом
+        обновлении, и перебирать пиксели заново на каждый вопрос незачем.
         """
+        if self._pixmap_cache is not None:
+            return self._pixmap_cache
         images = []
         for size in (22, 32, 48):
             try:
@@ -255,7 +291,8 @@ class TrayIcon:
                     argb[out + 3] = pixels[i + 2]
                     out += 4
             images.append((width, height, bytes(argb)))
-        return GLib.Variant("a(iiay)", images)
+        self._pixmap_cache = GLib.Variant("a(iiay)", images)
+        return self._pixmap_cache
 
     def _item_get(self, _conn, _sender, _path, _iface, name):
         values = {

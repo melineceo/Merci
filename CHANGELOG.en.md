@@ -5,6 +5,250 @@
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [semantic](https://semver.org/).
 
+## 0.2.0 — 2026-11-15
+
+A big release about three things: a new interface, updates and other systems.
+
+### Added
+
+- **New interface: Material You and “liquid glass”.** The window is split
+  into logic and view, and the view is rewritten from scratch. A glass
+  library list, a glass header with the container “island” (state, Eco and
+  FPS at hand, expands into a panel), app windows as “screen” tiles with the
+  state on the screen itself, a floating Launch button that shows what is
+  being done while it works. Colours come from the icon of the selected app
+  — the Material You engine is written in Python and matches the reference
+  (matugen) to a single channel unit. The glass is real — GTK itself blurs
+  the backdrop, so it looks the same on any desktop; “Reduce transparency”
+  is there for weak GPUs. Light and dark themes, a theme choice in settings,
+  a narrow window folds the library into an icon rail.
+- **Update centre** (“Updates” in the menu and in the library). Merci checks
+  by itself — at start-up and once a day — what is new: the Android image,
+  the Waydroid package (including waydroid-nvidia from the AUR), the ARM
+  translator and Merci itself. It installs on your click, one password
+  prompt per update. Updating is built not to break anything:
+  - before the image changes, extra windows are switched off (they keep the
+    image mounted) and the container service is stopped;
+  - the current image is kept (instantly and for free on btrfs and xfs), and
+    if the new one does not work it can be brought back with one button;
+  - an interrupted extraction is rolled back automatically; an update cannot
+    be cut off halfway, and a stalled download is stopped by the helper;
+  - Merci's settings come back after the update: window size, the Android
+    user limit, the flicker fix, the overlay with the translator;
+  - waydroid-nvidia is set up again after its package update (the container
+    does not start without it) — in the same rendering mode, not in whatever
+    the new version considers the default; the Venus server is restarted;
+  - at the end Merci checks not “the update ran” but “everything works”: the
+    session is up, Android responds, the translator and acceleration are
+    in place.
+- **Android's built-in updater is now hidden** (can be turned off in
+  settings). Tapping its notification rewrote the image underneath running
+  windows; Merci installs updates instead.
+- **Other systems.** The portability layer knows the Arch, Debian, Fedora,
+  openSUSE, Void, Alpine and NixOS families and immutable systems: how to
+  install packages, how to ask for the password (sudo with a window, pkexec,
+  run0, doas, a terminal), which firewall blocks the container (ufw,
+  firewalld), what the container service is called (systemd, OpenRC,
+  runit). In an X11 session Waydroid runs inside a nested Wayland
+  compositor. Where Merci does not know the command or may not run it, the
+  wizard says what to do.
+- **A build has a home.** Several builds of one package (the stock client
+  and a modified one) no longer evict each other: Launch goes to the build's
+  own window; if there is none, it asks whether to create one. Replacing a
+  build is first tried as an in-place update that keeps the data; erasing
+  happens only after a separate question listing what will be lost.
+- Renaming entries; a mark on the library row showing in how many windows
+  the app is open; “Retry” when the window list cannot be read.
+
+### Fixed
+
+- **Launching after power-on.** A hang while creating the window (a deadlock
+  in the waydroid-nvidia composer before 0.2.0) is now recognised in 20
+  seconds instead of 40, and there are three attempts instead of two. The
+  cause is fixed in waydroid-nvidia 0.2.0 itself — Merci will offer that
+  update.
+- The setup wizard showed “Waydroid is ready” when the Android image was not
+  downloaded: the plan crashed on its own bug and an empty plan read as
+  “all done”.
+- The chosen window size silently rolled back: the window kept a snapshot of
+  the settings from start-up and wrote the old values back with its own
+  saves.
+- “Close” and “Stop all” on one build's card closed another build's game
+  when the window held a different build of the same package.
+- “Remove from the container” on one build's card wiped another build's
+  install and data. Removing an entry no longer touches Android profiles and
+  erases the entry's windows before the entry itself, not “afterwards and
+  silently”.
+- Windows without an owner (the entry was removed, the containers stayed)
+  are no longer lost: the first opened card adopts them.
+- The root helper: one operation at a time (a lock), a check that a
+  window's settings are really separated from the main container, the
+  package checksum is verified before installing.
+- “Copy command” produced an unusable line for script steps.
+- **“Remove root (Magisk)” ended with an error and left Waydroid switched
+  off** — although root had already been removed by then. The removal was done
+  by the third-party `waydroid_script`, which treats any line on stderr as a
+  failure; `waydroid-nvidia` 0.2.0 prints its acceleration mode there on every
+  `waydroid upgrade -o`. On top of that, the removal downloaded Magisk itself
+  for no reason.
+- **“Install root (Magisk)” could not download Magisk**: the repository
+  `waydroid_script` took it from disappeared in November 2026 (404). The
+  download had no checksum and retried the server's refusal thirty times.
+- “Switch ARM translator” to libndk failed on the same stderr line.
+- **A privilege hole:** installing libndk (and libhoudini on images whose
+  version Merci did not know) ran a third-party script as root from a
+  directory any program of the user can write to, and changed the owner of a
+  directory along a path the same program could replace with a link. By
+  swapping a file, such a program got root at the very moment the person
+  typed the password.
+- Cancelling a step in the middle of root work: the step's shell exited at
+  once, with an “all good” code, and brought Waydroid up next to the helper
+  that was still working. The step now waits for the helper, and “Cancel” in
+  the wizard is there only while the step downloads or builds: once root
+  work begins it disappears — it never reached that work anyway. The package
+  swap during the first NVIDIA acceleration setup is protected the same way:
+  cancelling between removing `waydroid` and installing the new package left
+  the machine without Waydroid. Where the password is typed in a terminal,
+  closing that terminal in the middle of such work is no longer reported as
+  “the step failed”: the wizard waits for its real end.
+- Setup wizard: after a failed step “Check again” led to a dead end — the
+  caption said “Ready to install” (or “Waydroid is ready”) while the button
+  under it copied the command. “Close” after completed steps now actually
+  closes the wizard instead of starting another check.
+- The interface is smoother: the dock and panel scrim are animated, the glass
+  blur costs less rendering work, and hidden layers no longer intercept clicks
+  on the main buttons.
+- A failed translator step or a cancelled password prompt left Waydroid
+  switched off.
+
+**Actions that did not look at the current state.** A separate pass over
+the whole program after one report: “I installed NVIDIA acceleration, I
+click it again — and it says not installed again”.
+
+- **“NVIDIA hardware acceleration” offered to enable what was already
+  enabled.** The menu item never checked whether acceleration was in place.
+  You agreed — the package was rebuilt and reinstalled, and the setup reset
+  the flicker fix. The item now says what is installed (version, mode, how
+  the container renders right now) and only offers “Set up again” — through
+  the helper, which puts Merci's settings back. The first install takes the
+  same guarded path as a package update. Merci now notices a reset flicker
+  fix by itself, at startup, and offers to restore it.
+- “Install root” and “Remove root” look at whether root is there: an
+  installed one is offered a reinstall, a missing one gets “nothing to
+  remove”, leftovers get “remove the traces”. “Switch ARM translator” with
+  no translator offers to install one instead of “switching”.
+- **A stopped container was read as “no”.** “Fix flickering picture” answered
+  “already off”, MultiUser said “more than one user is not allowed” (and
+  offered to prepare what was ready), the “each app in its own window”
+  switch showed “off”: properties were only asked from a running container.
+  For a stopped one Merci now reads the files it will boot with.
+- “Each app in its own window” changed nothing while Waydroid was stopped,
+  yet reported success. The container is now started first and the setting
+  is verified; if it did not take, the switch goes back. The restart runs
+  under the common lock, not on top of a launch or an update.
+- **A cancelled password prompt left Waydroid switched off** in “Lock the
+  container's adb with a key”, “Restart the whole container” and “Allow
+  several Android users”; “Restore the ARM64 translator” reported
+  success on cancel and did not stop the extra windows, so the overlay got
+  disabled again. All four now use the common skeleton: one password
+  prompt, the work is done by the helper, Waydroid returns to the state it
+  was in. The helper restarts the container service with the tools of the
+  system at hand (systemd, OpenRC, runit) — it used to know systemd only,
+  and elsewhere the user limit silently never took effect.
+- **Eco Mode and the FPS limit** only reached the main window, and only if
+  it was running at the moment of the click; the FPS limit was also lost on
+  every restart. Merci still said “enabled”. Every window now gets the
+  settings when it starts, a switched-off setting is undone exactly where
+  it was applied, and the message tells the truth: applied now, or will
+  apply when Android starts.
+- “Apply” (multi-window) and “Clean memory” reported success with the
+  container stopped.
+- “Hide the built-in updater”: turning it off brought the updater back only
+  in running windows while saying “is back” — the rest now get it when they
+  start. A window that was deleted and created again is no longer treated
+  as “already hidden”.
+- **Adding the same APK again overwrote the entry:** the name you gave it,
+  the chosen Android profile, the last-run time. Merci now says “already in
+  the library” and shows that entry.
+- “Remove from the container” was available under “not installed” too — and
+  ended by asking you to confirm the removal in the Android window.
+- “Details” after an app crash showed the most recent report of all — it
+  could belong to another app — or “no records”. It is now the very report
+  that was found; crashes in extra windows are found as well, and the words
+  in the crash log are translated.
+- The “Set up Waydroid” wizard did not hold the window: while it worked as
+  root, the tray could start the session and state polling woke the stopped
+  container service. After a failure or a cancel the card showed stale
+  state.
+- “Fit to the screen” was offered every time the wizard opened with Waydroid
+  stopped and restarted it for nothing. It is no longer offered while extra
+  windows are open: restarting the main session under them disabled the
+  overlay with the translator.
+- A new window size did not reach the main container if it was stopped at
+  the moment of the change.
+- “Set up acceleration again” was offered again after a successful setup:
+  the steps did not remember what they had done. The same went for a
+  flicker fix applied by the wizard: Merci did not know about it and did
+  not restore it after an update.
+- Tray: “Stop Waydroid” on a stopped one asked and “stopped” it; “Restart”
+  ran without a question although it closes everything running; “Open the
+  running game” launched the last one even when nothing was running. While
+  root work is in progress the tray items leave the container alone.
+- Updates window: “Delete the image copy” and “Restore the image” check
+  that no update is running; Merci does not update itself twice at once.
+- **A step that restarts the container was declared done three seconds
+  after its command ended** — whether the container came up or not. The
+  promised wait for “the container is really running” never actually
+  happened: the wizard said “done” with Waydroid down, and the next step
+  started on top of a session that was still booting. A step now ends when
+  the container is running, or fails with “the container did not come up
+  in two minutes”.
+- “Fix flickering picture” restarted the main session under running extra
+  windows — Waydroid responds to that by disabling the overlay, and the ARM
+  translator disappears in every window. The step now stops the windows
+  first, like the others do.
+- Ctrl+Q closed Merci in the middle of root work — past the refusal that
+  “Quit” in the tray gives.
+- “Open the Android window” in the middle of a stop or a restart started
+  the session again; “Remove from the container” and “Delete from the
+  library” asked for confirmation and only then refused because the windows
+  were busy.
+- Library: an entry with a truncated APK copy or unreadable metadata is
+  repaired in place instead of being recreated (recreating wiped everything
+  in its folder); two identical files added at once no longer get in each
+  other's way.
+
+### Changed
+
+- **Root is installed and removed by Merci's own helper**, with no
+  `waydroid_script` running as root. Only a Magisk Delta file with a known
+  SHA-256 goes into the system (the list of builds lives on the root side);
+  it is taken from the cache or from Downloads, the network comes last. The
+  file is looked for before the password prompt and before Waydroid is
+  stopped, and however the step ends, Waydroid returns to the state it was
+  in. Removal downloads nothing, cleans the data of every window and then
+  uninstalls the Magisk app. Magisk files in the Android data are now
+  executable — with the old permissions Zygisk silently never started.
+- **`waydroid_script` no longer takes part in Merci.** Both ARM translators
+  (libhoudini and libndk) are installed by the helper from an archive with a
+  known checksum; when the container is off, the Android version is read
+  straight from the image. No cloning from GitHub, no pip, no third-party
+  code as root. A translator goes in whole or not at all (out of space — the
+  previous one is untouched), and on a switch the previous one is removed:
+  both used to stay, and ARM programs were registered by whichever name came
+  first alphabetically.
+- One-off steps from the menu (root, translator, acceleration, container
+  restart) start right after the question: there used to be a second
+  “Install” button after it — which had to be pressed to confirm a removal
+  too. While such a step runs, the window is locked the same way as during
+  an update.
+- When a step fails, the wizard states the reason right in the window — the
+  step's own last words instead of “details are in the log”.
+- About 35 unused functions and the module of the old clone scheme are
+  removed.
+- `waydroid-nvidia`: the “does this machine fit” check no longer rejects
+  proprietary kernel modules and older drivers — the setup itself checks.
+
 ## 0.1.2 — 2026-08-29
 
 A release about many windows: there are now as many as memory allows, and

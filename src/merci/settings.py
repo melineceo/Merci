@@ -9,33 +9,69 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 from .library import data_root
+
+
+# Настройки пишут и окно, и ядро — из разных потоков и через разные
+# экземпляры Settings. Запись «прочитать, поменять своё, записать» идёт под
+# этим замком, иначе две записи подряд теряли бы одна другую.
+_WRITE_LOCK = threading.Lock()
 
 
 class Settings:
     def __init__(self) -> None:
         self.path = os.path.join(data_root(), "settings.json")
         self._values: dict = {}
+        self._stamp = -1
+        self._refresh()
+
+    def _load(self) -> dict:
         try:
             with open(self.path, encoding="utf-8") as handle:
                 loaded = json.load(handle)
-            if isinstance(loaded, dict):
-                self._values = loaded
         except (OSError, ValueError):
             # Испорченный или отсутствующий файл — это просто «настроек нет».
-            pass
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _refresh(self) -> None:
+        """Перечитывает файл, если его с тех пор кто-то записал.
+
+        Экземпляр у окна живёт всё время работы программы, а ядро заводит
+        свои, короткие, — и пишет через них (выбранный размер окон,
+        например). Раньше окно держало снимок с момента запуска и каждой
+        своей записью возвращало в файл устаревшие чужие значения: размер
+        окон молча откатывался при первой же проверке обновлений.
+        """
+        try:
+            stamp = os.stat(self.path).st_mtime_ns
+        except OSError:
+            stamp = 0
+        if stamp != self._stamp:
+            self._values = self._load()
+            self._stamp = stamp
 
     def get(self, key: str, default=None):
+        self._refresh()
         return self._values.get(key, default)
 
     def set(self, key: str, value) -> None:
-        self._values[key] = value
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(self._values, handle, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+        with _WRITE_LOCK:
+            # Меняем только свой ключ — в свежем содержимом файла.
+            values = self._load()
+            values[key] = value
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(values, handle, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+            self._values = values
+            try:
+                self._stamp = os.stat(self.path).st_mtime_ns
+            except OSError:
+                self._stamp = -1
 
     @property
     def language(self) -> str:
@@ -66,6 +102,95 @@ class Settings:
     @minimize_on_launch.setter
     def minimize_on_launch(self, value: bool) -> None:
         self.set("minimize_on_launch", bool(value))
+
+    @property
+    def reduced_glass(self) -> bool:
+        """«Меньше прозрачности»: плотные поверхности вместо стекла.
+
+        Размытие фона считает видеокарта на каждый кадр; на слабой или при
+        программной отрисовке оно заметно. Облик остаётся тем же.
+        """
+        return bool(self.get("reduced_glass", False))
+
+    @reduced_glass.setter
+    def reduced_glass(self, value: bool) -> None:
+        self.set("reduced_glass", bool(value))
+
+    @property
+    def color_scheme(self) -> str:
+        """Тема: ``system`` (как на рабочем столе), ``light`` или ``dark``."""
+        value = self.get("color_scheme", "system")
+        return value if value in ("system", "light", "dark") else "system"
+
+    @color_scheme.setter
+    def color_scheme(self, value: str) -> None:
+        self.set("color_scheme", value)
+
+    @property
+    def auto_update_check(self) -> bool:
+        """Проверять обновления самой — раз в сутки и при запуске.
+
+        Проверка ничего не ставит: только смотрит, что вышло, и говорит об
+        этом. Ставит человек — у большинства обновлений просят пароль.
+        """
+        return bool(self.get("auto_update_check", True))
+
+    @auto_update_check.setter
+    def auto_update_check(self, value: bool) -> None:
+        self.set("auto_update_check", bool(value))
+
+    @property
+    def auto_update_merci(self) -> bool:
+        """Ставить новую Merci самой, без вопроса.
+
+        Только там, где это не требует пароля (флатпак, установленный для
+        пользователя). Новая версия включается после перезапуска программы.
+        """
+        return bool(self.get("auto_update_merci", True))
+
+    @auto_update_merci.setter
+    def auto_update_merci(self, value: bool) -> None:
+        self.set("auto_update_merci", bool(value))
+
+    @property
+    def hide_android_updater(self) -> bool:
+        """Прятать встроенный обновлятор Android.
+
+        Он ставит новый образ по нажатию на своё уведомление — переписывая
+        файл образа под работающими окнами. Пока обновлениями занимается
+        Merci, он не нужен, а его уведомления только копятся.
+        """
+        return bool(self.get("hide_android_updater", True))
+
+    @hide_android_updater.setter
+    def hide_android_updater(self, value: bool) -> None:
+        self.set("hide_android_updater", bool(value))
+
+    @property
+    def updates_checked_at(self) -> float:
+        """Когда обновления проверялись в последний раз (0 — никогда)."""
+        try:
+            return float(self.get("updates_checked_at", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @updates_checked_at.setter
+    def updates_checked_at(self, value: float) -> None:
+        self.set("updates_checked_at", float(value))
+
+    @property
+    def updates_found(self) -> list[dict]:
+        """Что нашла последняя проверка: [{key, title, available}].
+
+        Нужно, чтобы отметка об обновлениях была на месте сразу при запуске,
+        а сообщение о находке не повторялось каждый день заново.
+        """
+        value = self.get("updates_found", [])
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    @updates_found.setter
+    def updates_found(self, value: list[dict]) -> None:
+        self.set("updates_found", list(value))
 
     @property
     def window_size(self) -> tuple[int, int]:

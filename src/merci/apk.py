@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 import zipfile
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ _ATTR_IDS = {
     0x01010001: "label",
     0x01010002: "icon",
     0x01010003: "name",
+    0x0101000E: "enabled",
+    0x01010202: "targetActivity",
     0x0101021B: "versionCode",
     0x0101021C: "versionName",
     0x0101020C: "targetSdkVersion",
@@ -46,8 +49,64 @@ _LAUNCHER_CATEGORIES = {
 }
 
 
+# Сколько байт манифеста и значка мы согласны распаковать. Сжатие deflate
+# даёт тысячекратный выигрыш на однообразных данных: APK в двадцать
+# мегабайт может нести «манифест» на двадцать гигабайт, и чтение его
+# целиком клало бы по памяти не только Merci, но и весь сеанс. Настоящий
+# манифест — десятки килобайт, значок — сотни.
+_MANIFEST_LIMIT = 8 << 20
+_ICON_LIMIT = 4 << 20
+
+# Имя пакета, каким его принимает сам Android: части из латинских букв, цифр
+# и подчёркиваний, каждая с буквы, через точку и не меньше двух. Это не
+# придирка: имя уходит в команды adb, а adb склеивает аргументы в одну
+# строку для оболочки на той стороне. Манифест пишет автор APK, и «пакет»
+# вида `a.b; rm -rf /sdcard` был бы исполнен как команда.
+_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+")
+# Имя класса activity: то же плюс `$` у вложенных классов.
+_CLASS = re.compile(r"[A-Za-z0-9_.$]+")
+
+
+def valid_package(name: str) -> bool:
+    return bool(_PACKAGE.fullmatch(name or "")) and len(name) <= 255
+
+
+def valid_activity(name: str) -> bool:
+    return bool(_CLASS.fullmatch(name or "")) and len(name) <= 255
+
+
+def full_activity(package: str, name: str) -> str:
+    """Полное имя класса activity — как его записал бы сам Android.
+
+    В манифесте имя бывает сокращённым: «.Main» или просто «Main» значат
+    «в пакете приложения». `am start` понимает только первое сокращение.
+    """
+    if not name:
+        return ""
+    if name.startswith("."):
+        return package + name
+    if "." not in name:
+        return f"{package}.{name}"
+    return name
+
+
 class ApkError(Exception):
     """APK нечитаем или это вообще не APK."""
+
+
+def _read_limited(archive: zipfile.ZipFile, name: str, limit: int) -> bytes:
+    """Читает файл из архива, но не больше ``limit`` байт.
+
+    Размеру из заголовка верить нельзя — его пишет тот же, кто собрал
+    архив, — поэтому читаем сами и останавливаемся на пределе.
+    """
+    if archive.getinfo(name).file_size > limit:
+        raise ApkError(f"{name} неправдоподобно велик — файл повреждён или подделан")
+    with archive.open(name) as source:
+        data = source.read(limit + 1)
+    if len(data) > limit:
+        raise ApkError(f"{name} неправдоподобно велик — файл повреждён или подделан")
+    return data
 
 
 class _StringPool:
@@ -201,10 +260,13 @@ def _read_element(chunk: bytes, pool: _StringPool, resource_ids: list[int]) -> _
 def _find_launch_activity(elements: list[_Element]) -> str:
     """Ищем activity, у которой в intent-filter есть MAIN + LAUNCHER."""
     current_component = ""
+    current_enabled = True
+    current_target = ""
     in_filter = False
     has_main = False
     has_launcher = False
     fallback = ""
+    disabled = ""
 
     for element in elements:
         path = str(element.attrs.get("__path__", ""))
@@ -212,6 +274,14 @@ def _find_launch_activity(elements: list[_Element]) -> str:
 
         if element.name in ("activity", "activity-alias"):
             current_component = name
+            # enabled="false" — обычное дело у псевдонимов: приложение держит
+            # несколько значков (обычный, праздничный) и включает один.
+            current_enabled = element.attrs.get("enabled", True) is not False
+            current_target = (
+                str(element.attrs.get("targetActivity", ""))
+                if element.name == "activity-alias"
+                else ""
+            )
             fallback = fallback or name
             in_filter = False
         elif element.name == "intent-filter" and current_component:
@@ -225,9 +295,15 @@ def _find_launch_activity(elements: list[_Element]) -> str:
             continue
 
         if in_filter and has_main and has_launcher and current_component:
-            return current_component
+            if current_enabled:
+                return current_component
+            # Выключенный компонент запустить нельзя: `am start` ответит, что
+            # такого класса нет. Запоминаем то, на что он указывает, и ищем
+            # дальше включённый.
+            disabled = disabled or current_target or current_component
+            in_filter = False
 
-    return fallback
+    return disabled or fallback
 
 
 def inspect(apk_path: str) -> ApkInfo:
@@ -237,14 +313,19 @@ def inspect(apk_path: str) -> ApkInfo:
             names = archive.namelist()
             if "AndroidManifest.xml" not in names:
                 raise ApkError("в архиве нет AndroidManifest.xml — это не APK")
-            manifest = archive.read("AndroidManifest.xml")
+            manifest = _read_limited(archive, "AndroidManifest.xml", _MANIFEST_LIMIT)
             icon_entry = _pick_icon(names)
     except zipfile.BadZipFile as exc:
         raise ApkError("файл не открывается как zip-архив") from exc
-    except OSError as exc:
+    except (OSError, KeyError) as exc:
         raise ApkError(f"не удалось прочитать файл: {exc}") from exc
 
-    elements = _parse_axml(manifest)
+    try:
+        elements = _parse_axml(manifest)
+    except (struct.error, IndexError, ValueError, OverflowError, MemoryError) as exc:
+        # Битый пул строк или смещения за границей файла: без этого
+        # добавление APK падало с трассировкой вместо понятного отказа.
+        raise ApkError("AndroidManifest.xml повреждён и не читается") from exc
     info = ApkInfo(icon_entry=icon_entry)
 
     abis: list[str] = []
@@ -257,6 +338,11 @@ def inspect(apk_path: str) -> ApkInfo:
 
     for element in elements:
         if element.name == "manifest":
+            # Только корневой тег: Android читает именно его. Вложенный
+            # <manifest> — способ показать Merci одно имя пакета, а
+            # установить другое.
+            if element.attrs.get("__path__") != "manifest" or info.package:
+                continue
             info.package = str(element.attrs.get("package", ""))
             info.version_name = str(element.attrs.get("versionName", ""))
             info.version_code = str(element.attrs.get("versionCode", ""))
@@ -269,10 +355,19 @@ def inspect(apk_path: str) -> ApkInfo:
             if label and not label.startswith("@0x"):
                 info.label = label
 
-    info.launch_activity = _find_launch_activity(elements)
-
     if not info.package:
         raise ApkError("в манифесте нет имени пакета")
+    if not valid_package(info.package):
+        raise ApkError("в манифесте недопустимое имя пакета — такой APK не установится")
+
+    activity = full_activity(info.package, _find_launch_activity(elements))
+    # Странное имя класса — не повод отказывать: без activity Merci запустит
+    # приложение по имени пакета, как это делает сам Waydroid.
+    info.launch_activity = activity if valid_activity(activity) else ""
+    # Остальное только показывается человеку, но и тут длина ни к чему.
+    info.label = info.label[:120]
+    info.version_name = info.version_name[:60]
+    info.version_code = info.version_code[:30]
     return info
 
 
@@ -320,12 +415,12 @@ def extract_icon(apk_path: str, entry: str, destination: str) -> bool:
     if not entry:
         return False
     try:
-        with zipfile.ZipFile(apk_path) as archive, archive.open(entry) as source:
-            payload = source.read()
+        with zipfile.ZipFile(apk_path) as archive:
+            payload = _read_limited(archive, entry, _ICON_LIMIT)
         if not payload.startswith(b"\x89PNG"):
             return False
         with open(destination, "wb") as target:
             target.write(payload)
         return True
-    except (OSError, KeyError, zipfile.BadZipFile):
+    except (OSError, KeyError, zipfile.BadZipFile, ApkError):
         return False

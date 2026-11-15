@@ -10,56 +10,15 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
 from .library import data_root  # noqa: E402
 from .i18n import set_language, tr  # noqa: E402
 from .settings import Settings  # noqa: E402
-from .window import MerciWindow  # noqa: E402
+from .window import MerciWindow, apply_color_scheme  # noqa: E402
 
 APP_ID = "xyz.hackerstone.Merci"
-VERSION = "0.1.2"
-
-_CSS = """
-.merci-icon {
-  border-radius: 12px;
-}
-.merci-log {
-  font-size: 0.82em;
-  background: transparent;
-}
-.merci-badge {
-  font-size: 0.75em;
-  font-weight: bold;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: alpha(@warning_color, 0.18);
-  color: @warning_color;
-}
-/* объявлено после .merci-badge: иначе общее правило перекрывает цвет */
-.merci-badge-native {
-  background: alpha(@success_color, 0.16);
-  color: @success_color;
-}
-.merci-percent {
-  font-size: 2.6em;
-  font-weight: 300;
-  font-feature-settings: "tnum";
-}
-.merci-progress trough,
-.merci-progress progress {
-  min-height: 10px;
-  border-radius: 999px;
-}
-.merci-step {
-  transition: opacity 200ms ease;
-}
-.merci-row:selected .merci-badge {
-  background: alpha(currentColor, 0.2);
-  color: inherit;
-}
-"""
-
+VERSION = "0.2.0"
 
 class MerciApplication(Adw.Application):
     def __init__(self) -> None:
@@ -72,18 +31,15 @@ class MerciApplication(Adw.Application):
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
 
-        provider = Gtk.CssProvider()
-        provider.load_from_string(_CSS)
-        display = Gdk.Display.get_default()
-        if display is not None:
-            Gtk.StyleContext.add_provider_for_display(
-                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-            )
+        # Оформление целиком живёт в пакете ui: стиль подключает вид, когда
+        # строится. Здесь — только выбор светлой или тёмной темы.
+        apply_color_scheme(Settings().color_scheme)
 
         for name, callback in (
             ("about", self._on_about),
             ("open-library", self._on_open_library),
-            ("quit", lambda *_: self.quit()),
+            ("show-updates", self._on_show_updates),
+            ("quit", self._on_quit),
         ):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", callback)
@@ -102,6 +58,16 @@ class MerciApplication(Adw.Application):
             if path and self.window is not None:
                 self.window.import_apk(path)
 
+    def _on_quit(self, *_args) -> None:
+        """Ctrl+Q. Выходим через окно: во время работы под root оно в выходе
+        отказывает (ход работы стал бы не виден, а итог — не проверен).
+        Раньше сочетание клавиш закрывало программу мимо этого отказа —
+        в том числе поверх мастера, посреди шага."""
+        if self.window is not None:
+            self.window.request_quit()
+        else:
+            self.quit()
+
     def _on_about(self, *_args) -> None:
         about = Adw.AboutDialog(
             application_name="Merci",
@@ -115,8 +81,20 @@ class MerciApplication(Adw.Application):
                 "приложение ему.")
             ),
         )
-        about.add_credit_section(tr("Работает поверх"), ["Waydroid", "waydroid_script"])
+        about.add_credit_section(tr("Работает поверх"), ["Waydroid"])
+        # Сам waydroid_script Merci больше не исполняет, но трансляторы ARM
+        # ставит из тех же архивов и тем же порядком, что и он.
+        about.add_credit_section(
+            tr("Трансляторы ARM и порядок их установки"), ["waydroid_script (casualsnek)"]
+        )
         about.present(self.window)
+
+    def _on_show_updates(self, *_args) -> None:
+        """Нажали на уведомление об обновлениях: окно могло быть в трее."""
+        self.do_activate()
+        if self.window is not None:
+            self.window.present_window()
+            self.window.show_updates()
 
     def _on_open_library(self, *_args) -> None:
         Gtk.FileLauncher.new(Gio.File.new_for_path(data_root())).launch(

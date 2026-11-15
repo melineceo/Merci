@@ -54,8 +54,11 @@ def set_language(code: str) -> None:
     _current = code if code in LANGUAGES else "ru"
     if _current == "en":
         from .lang_en import TABLE
+        from .ui.lang_en_ui import TABLE as VIEW_TABLE
 
-        _table = TABLE
+        # Строки вида лежат рядом с ним самим: так пакет ui остаётся
+        # цельным, а общий словарь не разрастается подписями кнопок.
+        _table = {**VIEW_TABLE, **TABLE}
     else:
         _table = {}
 

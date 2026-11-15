@@ -26,14 +26,27 @@ ANDROID_JAR="${ANDROID_JAR:-$SDK/platforms/android-33/android.jar}"
 echo "android.jar: $ANDROID_JAR"
 echo "инструменты: $TOOLS"
 
-# 1. Компилируем java в class-файлы. Целевая версия 8: dex-компилятор
-#    старших не понимает без дополнительной настройки.
-mkdir -p "$WORK/classes"
-javac -source 8 -target 8 -nowarn \
-    -bootclasspath "$ANDROID_JAR" \
-    -classpath "$ANDROID_JAR" \
-    -d "$WORK/classes" \
-    $(find "$SRC/src" -name '*.java')
+# 1. Компилируем java в class-файлы. Начинаем с версии 8 — её dex-компилятор
+#    понимает без оговорок, — но новые JDK от неё отказываются одна за другой
+#    (в 27-й это уже предупреждение об устаревании). Поэтому при отказе
+#    поднимаемся выше: 11 и 17 нынешний d8 тоже принимает.
+COMPILED=""
+for LEVEL in 8 11 17; do
+    rm -rf "$WORK/classes"
+    mkdir -p "$WORK/classes"
+    # -bootclasspath допустим только для версии 8; дальше классы java.*
+    # берутся из самого JDK, а android.* — из android.jar.
+    if [ "$LEVEL" = 8 ]; then BOOT="-bootclasspath $ANDROID_JAR"; else BOOT=""; fi
+    if javac -source "$LEVEL" -target "$LEVEL" -nowarn $BOOT \
+        -classpath "$ANDROID_JAR" \
+        -d "$WORK/classes" \
+        $(find "$SRC/src" -name '*.java') 2>"$WORK/javac.log"; then
+        COMPILED="$LEVEL"
+        break
+    fi
+done
+[ -n "$COMPILED" ] || { cat "$WORK/javac.log"; echo "javac не собрал исходники"; exit 1; }
+echo "исходники собраны как Java $COMPILED"
 
 # 2. class → dex.
 "$TOOLS/d8" --release --lib "$ANDROID_JAR" \
